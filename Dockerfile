@@ -10,7 +10,7 @@ COPY webui/ .
 RUN pnpm run build
 
 # Build stage for the backend
-FROM golang:latest AS backend-build
+FROM golang:1.26.6 AS backend-build
 ARG VERSION=dev
 WORKDIR /app
 COPY go.mod go.sum ./

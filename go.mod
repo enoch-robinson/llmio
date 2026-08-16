@@ -1,6 +1,6 @@
 module github.com/atopos31/llmio
 
-go 1.26.1
+go 1.26.6
 
 require (
 	github.com/atopos31/nsxno v0.1.1
