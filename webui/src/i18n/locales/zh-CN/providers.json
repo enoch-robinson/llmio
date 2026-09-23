@@ -57,6 +57,7 @@
     "delete_success": "提供商 {{name}} 删除成功",
     "delete_failed": "删除提供商失败: {{message}}",
     "copy_model": "已复制模型名称: {{name}}",
+    "copy_failed": "复制失败",
     "fetch_model_failed": "获取提供商模型失败: {{message}}"
   }
 }

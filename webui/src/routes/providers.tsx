@@ -31,6 +31,7 @@ import {
   getProviderModels
 } from "@/lib/api";
 import type { Provider, ProviderTemplate, ProviderModel } from "@/lib/api";
+import { copyToClipboard } from "@/lib/utils";
 import { toast } from "sonner";
 import { ExternalLink, Pencil, Trash2, Boxes } from "lucide-react";
 import { ProviderFormDialog } from "@/routes/providers/provider-form-dialog";
@@ -130,8 +131,12 @@ export default function ProvidersPage() {
   };
 
   const copyModelName = async (modelName: string) => {
-    await navigator.clipboard.writeText(modelName);
-    toast.success(t('toast.copy_model', { name: modelName }));
+    try {
+      await copyToClipboard(modelName);
+      toast.success(t('toast.copy_model', { name: modelName }));
+    } catch {
+      toast.error(t('toast.copy_failed'));
+    }
   };
 
   const handleDelete = async () => {

@@ -57,6 +57,7 @@
     "delete_success": "供應商 {{name}} 刪除成功",
     "delete_failed": "刪除供應商失敗: {{message}}",
     "copy_model": "已複製模型名稱: {{name}}",
+    "copy_failed": "複製失敗",
     "fetch_model_failed": "取得供應商模型失敗: {{message}}"
   }
 }

@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import Loading from "@/components/loading";
 import { useTheme } from "@/components/theme-provider";
 import { getChatIO, type ChatIO } from "@/lib/api";
+import { copyToClipboard } from "@/lib/utils";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { duotoneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { duotoneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -36,7 +37,7 @@ function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(text);
+      await copyToClipboard(text);
       setCopied(true);
       toast.success(t("chat_io.copied"));
       setTimeout(() => setCopied(false), 2000);

@@ -57,6 +57,7 @@
     "delete_success": "Provider {{name}} deleted successfully",
     "delete_failed": "Failed to delete provider: {{message}}",
     "copy_model": "Copied model name: {{name}}",
+    "copy_failed": "Copy failed",
     "fetch_model_failed": "Failed to fetch provider models: {{message}}"
   }
 }

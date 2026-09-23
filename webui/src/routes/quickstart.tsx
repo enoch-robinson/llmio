@@ -10,6 +10,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { getAuthKeys, getModelOptions } from "@/lib/api";
+import { copyToClipboard } from "@/lib/utils";
 import { toast } from "sonner";
 import { Copy, Check } from "lucide-react";
 import { useTheme } from "@/components/theme-provider";
@@ -412,7 +413,7 @@ function CodeCopyButton({
 
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(text);
+      await copyToClipboard(text);
       setCopied(true);
       toast.success(successLabel);
       setTimeout(() => setCopied(false), 2000);
@@ -448,7 +449,7 @@ function InlineCopyButton({
 
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(text);
+      await copyToClipboard(text);
       setCopied(true);
       toast.success(successLabel);
       setTimeout(() => setCopied(false), 2000);

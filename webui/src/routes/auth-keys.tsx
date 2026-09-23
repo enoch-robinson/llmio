@@ -56,7 +56,7 @@ import {
 } from "lucide-react";
 import Loading from "@/components/loading";
 import { toast } from "sonner";
-import { cn } from "@/lib/utils";
+import { cn, copyToClipboard } from "@/lib/utils";
 import { Calendar } from "@/components/ui/calendar";
 import {
   getAuthKeys,
@@ -233,7 +233,7 @@ export default function AuthKeysPage() {
 
   const handleCopyKey = async (keyValue: string) => {
     try {
-      await navigator.clipboard.writeText(keyValue);
+      await copyToClipboard(keyValue);
       toast.success(t('toast.copy_success'));
     } catch (error) {
       console.error(error);
