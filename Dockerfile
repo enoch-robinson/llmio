@@ -3,9 +3,11 @@
 # Build stage for the frontend
 FROM node:20 AS frontend-build
 WORKDIR /app
-COPY webui/package.json webui/pnpm-lock.yaml ./
-RUN npm install -g pnpm
-RUN --mount=type=cache,target=/root/.local/share/pnpm/store pnpm install
+# pnpm-workspace.yaml 定义 ignoredBuiltDependencies，必须与 lockfile 一起拷贝，
+# 否则 pnpm 会因未批准的构建脚本而中断安装
+COPY webui/package.json webui/pnpm-lock.yaml webui/pnpm-workspace.yaml ./
+RUN npm install -g pnpm@10
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store pnpm install --frozen-lockfile
 COPY webui/ .
 RUN pnpm run build
 
