@@ -1,6 +1,6 @@
 services:
   llmio:
-    image: atopos31/llmio:latest
+    image: ghcr.io/enoch-robinson/llmio:latest
     ports:
       - 7070:7070
     volumes:

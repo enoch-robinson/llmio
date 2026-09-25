@@ -25,7 +25,7 @@ LLMIO is a Go-based LLM load‑balancing gateway that provides a unified REST AP
 ```yaml
 services:
   llmio:
-    image: atopos31/llmio:latest
+    image: ghcr.io/enoch-robinson/llmio:latest
     ports:
       - 7070:7070
     volumes:
@@ -48,13 +48,13 @@ docker run -d \
   -e GIN_MODE=release \
   -e TOKEN=<YOUR_TOKEN> \
   -e TZ=Asia/Shanghai \
-  atopos31/llmio:latest
+  ghcr.io/enoch-robinson/llmio:latest
 ```
 
 ### Local Run
-Download the release package for your OS/arch from [releases](https://github.com/atopos31/llmio/releases) (version > 0.5.13). Example for linux amd64:
+Download the release package for your OS/arch from [releases](https://github.com/enoch-robinson/llmio/releases). Example for linux amd64:
 ```bash
-wget https://github.com/atopos31/llmio/releases/download/v0.5.13/llmio_0.5.13_linux_amd64.tar.gz
+wget https://github.com/enoch-robinson/llmio/releases/download/v0.8.9-enoch.1/llmio_0.8.9-enoch.1_linux_amd64.tar.gz
 ```
 Extract:
 ```bash
@@ -80,7 +80,7 @@ The service will create `./db/llmio.db` in the current directory as the SQLite p
 
 Clone:
 ```bash
-git clone https://github.com/atopos31/llmio.git
+git clone https://github.com/enoch-robinson/llmio.git
 cd llmio
 ```
 Build frontend (pnpm required):
