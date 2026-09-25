@@ -107,7 +107,11 @@ func ProviderTestHandler(c *gin.Context) {
 	}
 
 	// Test connectivity by fetching models
-	client := providers.GetClient(time.Second*360, chatModel.Proxy)
+	// 一次性连通性测试请求:按请求控制超时,而非 Transport 配置(保留上游 6 分钟语义)
+	ctx, cancel := context.WithTimeout(ctx, 360*time.Second)
+	defer cancel()
+
+	client := providers.GetClient(chatModel.Proxy)
 	var testBody []byte
 	switch chatModel.Type {
 	case consts.StyleOpenAI:
@@ -200,8 +204,9 @@ func TestReactHandler(c *gin.Context) {
 
 	opts := []option.RequestOption{
 		option.WithBaseURL(config.BaseURL),
-		// 代理与响应头超时沿用真实转发的客户端（无整体超时，流式才不会被截断）
-		option.WithHTTPClient(providers.GetClient(time.Second*360, chatModel.Proxy)),
+		// 与真实转发共用按代理缓存的客户端；不设整体超时，流式才不会被截断
+		//（响应头超时由转发路径按请求控制）
+		option.WithHTTPClient(providers.GetClient(chatModel.Proxy)),
 	}
 	for key, values := range header {
 		for _, value := range values {

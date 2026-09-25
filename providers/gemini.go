@@ -62,6 +62,10 @@ type geminiModel struct {
 }
 
 func (g *Gemini) Models(ctx context.Context) ([]Model, error) {
+	// 一次性列表请求:按请求控制超时,而非 Transport 配置
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/models", strings.TrimRight(g.BaseURL, "/")), nil)
 	if err != nil {
 		return nil, err
@@ -69,7 +73,7 @@ func (g *Gemini) Models(ctx context.Context) ([]Model, error) {
 	req.Header.Set("x-goog-api-key", g.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	res, err := GetClient(30*time.Second, g.Proxy).Do(req)
+	res, err := GetClient(g.Proxy).Do(req)
 	if err != nil {
 		return nil, err
 	}

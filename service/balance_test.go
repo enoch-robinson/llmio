@@ -78,7 +78,7 @@ func balanceTestMeta(primaryBaseURL, backupBaseURL string) ProvidersWithMeta {
 	}
 }
 
-func runBalanceChat(t *testing.T, meta ProvidersWithMeta) (*http.Response, *models.ChatLog, error) {
+func runBalanceChat(t *testing.T, meta ProvidersWithMeta) (*http.Response, *models.ChatLog, context.CancelCauseFunc, error) {
 	t.Helper()
 	before := Before{
 		Model:     "test-model",
@@ -100,10 +100,11 @@ func TestBalanceChatSkipsBackupWhenPrimaryHealthy(t *testing.T) {
 	primary, primaryCalls := newUpstream(t, http.StatusOK, `{"ok":true}`)
 	backup, backupCalls := newUpstream(t, http.StatusOK, `{"ok":true}`)
 
-	res, log, err := runBalanceChat(t, balanceTestMeta(primary.URL, backup.URL))
+	res, log, cancel, err := runBalanceChat(t, balanceTestMeta(primary.URL, backup.URL))
 	if err != nil {
 		t.Fatalf("BalanceChat() unexpected error: %v", err)
 	}
+	defer cancel(nil)
 	defer res.Body.Close()
 
 	if log.ProviderName != "primary-provider" {
@@ -127,10 +128,11 @@ func TestBalanceChatFallsBackAfterPrimaryExhausted(t *testing.T) {
 	primary, primaryCalls := newUpstream(t, http.StatusInternalServerError, `{"error":"boom"}`)
 	backup, backupCalls := newUpstream(t, http.StatusOK, `{"ok":true}`)
 
-	res, log, err := runBalanceChat(t, balanceTestMeta(primary.URL, backup.URL))
+	res, log, cancel, err := runBalanceChat(t, balanceTestMeta(primary.URL, backup.URL))
 	if err != nil {
 		t.Fatalf("期望降级到备用后成功，实际 error: %v", err)
 	}
+	defer cancel(nil)
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
@@ -158,7 +160,7 @@ func TestBalanceChatReportsBackupExhausted(t *testing.T) {
 	primary, _ := newUpstream(t, http.StatusInternalServerError, `{"error":"primary boom"}`)
 	backup, _ := newUpstream(t, http.StatusInternalServerError, `{"error":"backup boom"}`)
 
-	_, _, err := runBalanceChat(t, balanceTestMeta(primary.URL, backup.URL))
+	_, _, _, err := runBalanceChat(t, balanceTestMeta(primary.URL, backup.URL))
 	if err == nil {
 		t.Fatal("主备全挂时应返回 error")
 	}
@@ -180,7 +182,7 @@ func TestBalanceChatWithoutBackupKeepsLegacyBehavior(t *testing.T) {
 	meta.BackupWeightItems = map[uint]int{}
 	delete(meta.ModelWithProviderMap, 102)
 
-	_, _, err := runBalanceChat(t, meta)
+	_, _, _, err := runBalanceChat(t, meta)
 	if err == nil {
 		t.Fatal("无备用关联且主关联失败时应返回 error")
 	}

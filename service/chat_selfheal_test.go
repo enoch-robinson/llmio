@@ -151,10 +151,11 @@ func TestBalanceChatSelfHealsDroppedParam(t *testing.T) {
 	meta, before := selfHealFixture(t, server)
 	notes := NewBridgeNotes()
 
-	res, log, err := BalanceChat(context.Background(), time.Now(), "openai", before, meta, models.ReqMeta{}, notes)
+	res, log, cancel, err := BalanceChat(context.Background(), time.Now(), "openai", before, meta, models.ReqMeta{}, notes)
 	if err != nil {
 		t.Fatalf("BalanceChat: %v", err)
 	}
+	defer cancel(nil)
 	defer res.Body.Close()
 
 	// 成功行由 handler 落库（BalanceChat 只返回 log，Status 初始为 running，
@@ -221,7 +222,7 @@ func TestBalanceChatSelfHealBudgetExhausted(t *testing.T) {
 	before.raw = []byte(`{"model":"gpt-selfheal","messages":[{"role":"user","content":"hi"}],"top_k":40,"logit_bias":{"a":1},"stop_sequences":["x"],"metadata":{"u":1}}`)
 	meta.MaxRetry = 1
 
-	_, _, err := BalanceChat(context.Background(), time.Now(), "openai", before, meta, models.ReqMeta{}, NewBridgeNotes())
+	_, _, _, err := BalanceChat(context.Background(), time.Now(), "openai", before, meta, models.ReqMeta{}, NewBridgeNotes())
 	if err == nil {
 		t.Fatal("预算耗尽后应返回错误")
 	}
@@ -259,7 +260,7 @@ func TestBalanceChatSelfHealDisabled(t *testing.T) {
 	meta, before := selfHealFixture(t, server)
 	meta.MaxRetry = 1
 
-	_, _, err := BalanceChat(context.Background(), time.Now(), "openai", before, meta, models.ReqMeta{}, NewBridgeNotes())
+	_, _, _, err := BalanceChat(context.Background(), time.Now(), "openai", before, meta, models.ReqMeta{}, NewBridgeNotes())
 	if err == nil {
 		t.Fatal("关闭自愈后应失败")
 	}
@@ -280,10 +281,11 @@ func TestBalanceChatDowngradesToolContentArray(t *testing.T) {
 	before.raw = []byte(`{"model":"gpt-selfheal","messages":[{"role":"user","content":"hi"},{"role":"tool","tool_call_id":"t1","content":[{"type":"text","text":"结果"},{"type":"image_url","image_url":{"url":"data:image/png;base64,QUJD"}}]}]}`)
 	notes := NewBridgeNotes()
 
-	res, log, err := BalanceChat(context.Background(), time.Now(), "openai", before, meta, models.ReqMeta{}, notes)
+	res, log, cancel, err := BalanceChat(context.Background(), time.Now(), "openai", before, meta, models.ReqMeta{}, notes)
 	if err != nil {
 		t.Fatalf("BalanceChat: %v", err)
 	}
+	defer cancel(nil)
 	defer res.Body.Close()
 	log.Status = consts.StatusSuccess
 	if _, err := SaveChatLog(context.Background(), *log); err != nil {
@@ -331,7 +333,7 @@ func TestBalanceChat429NotSelfHealed(t *testing.T) {
 	meta, before := selfHealFixture(t, server)
 	meta.MaxRetry = 1
 
-	_, _, err := BalanceChat(context.Background(), time.Now(), "openai", before, meta, models.ReqMeta{}, NewBridgeNotes())
+	_, _, _, err := BalanceChat(context.Background(), time.Now(), "openai", before, meta, models.ReqMeta{}, NewBridgeNotes())
 	if err == nil {
 		t.Fatal("429 应失败")
 	}

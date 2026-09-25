@@ -109,7 +109,7 @@ func chatHandler(c *gin.Context, preProcessor service.Beforer, postProcessor ser
 	// 协议互转的记账盒：转发路径往里写"改了什么"，日志落库时读
 	bridgeNotes := service.NewBridgeNotes()
 	// 调用负载均衡后的 provider 并转发
-	res, log, err := service.BalanceChat(ctx, startReq, style, *before, *providersWithMeta, models.ReqMeta{
+	res, log, cancelUpstream, err := service.BalanceChat(ctx, startReq, style, *before, *providersWithMeta, models.ReqMeta{
 		Header:    c.Request.Header,
 		RemoteIP:  c.ClientIP(),
 		UserAgent: c.Request.UserAgent(),
@@ -118,6 +118,7 @@ func chatHandler(c *gin.Context, preProcessor service.Beforer, postProcessor ser
 		common.InternalServerError(c, err.Error())
 		return
 	}
+	defer cancelUpstream(nil)
 	defer res.Body.Close()
 
 	logId, err := service.SaveChatLog(ctx, *log)

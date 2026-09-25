@@ -37,12 +37,16 @@ func (o *OpenAIRes) BuildReq(ctx context.Context, header http.Header, model stri
 }
 
 func (o *OpenAIRes) Models(ctx context.Context) ([]Model, error) {
+	// 一次性列表请求:按请求控制超时,而非 Transport 配置
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/models", o.BaseURL), nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", o.APIKey))
-	res, err := GetClient(30*time.Second, o.Proxy).Do(req)
+	res, err := GetClient(o.Proxy).Do(req)
 	if err != nil {
 		return nil, err
 	}

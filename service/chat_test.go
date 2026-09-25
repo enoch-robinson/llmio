@@ -129,7 +129,7 @@ func TestBuildHeadersKeepsGzipResponseReadable(t *testing.T) {
 	}
 	req.Header = header
 
-	res, err := providers.GetClient(10*time.Second, "").Do(req)
+	res, err := providers.GetClient("").Do(req)
 	if err != nil {
 		t.Fatalf("do request: %v", err)
 	}

@@ -52,6 +52,10 @@ type AnthropicModel struct {
 }
 
 func (a *Anthropic) Models(ctx context.Context) ([]Model, error) {
+	// 一次性列表请求:按请求控制超时,而非 Transport 配置
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/models", a.BaseURL), nil)
 	if err != nil {
 		return nil, err
@@ -59,7 +63,7 @@ func (a *Anthropic) Models(ctx context.Context) ([]Model, error) {
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("x-api-key", a.APIKey)
 	req.Header.Set("anthropic-version", a.Version)
-	res, err := GetClient(30*time.Second, a.Proxy).Do(req)
+	res, err := GetClient(a.Proxy).Do(req)
 	if err != nil {
 		return nil, err
 	}
