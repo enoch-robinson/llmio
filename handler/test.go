@@ -106,7 +106,11 @@ func ProviderTestHandler(c *gin.Context) {
 	}
 
 	// Test connectivity by fetching models
-	client := providers.GetClient(time.Second*360, chatModel.Proxy)
+	// 一次性连通性测试请求:按请求控制超时,而非 Transport 配置(保留上游 6 分钟语义)
+	ctx, cancel := context.WithTimeout(ctx, 360*time.Second)
+	defer cancel()
+
+	client := providers.GetClient(chatModel.Proxy)
 	var testBody []byte
 	switch chatModel.Type {
 	case consts.StyleOpenAI:

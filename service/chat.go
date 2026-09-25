@@ -21,7 +21,47 @@ import (
 	"gorm.io/gorm"
 )
 
-func BalanceChat(ctx context.Context, start time.Time, style string, before Before, providersWithMeta ProvidersWithMeta, reqMeta models.ReqMeta) (*http.Response, *models.ChatLog, error) {
+// errResponseHeaderTimeout 表示在预算时间内未收到上游响应头,
+// 用于区分主动的头阶段超时与客户端断开(context.Canceled)。
+var errResponseHeaderTimeout = errors.New("timeout waiting for response headers")
+
+// doWithHeaderTimeout 包装 client.Do,仅在响应头阶段施加超时:
+// 计时器到点前收到响应头则停止计时,后续 body 传输不受影响。
+// headerTimeout<=0 表示不限制头等待时间(与原 ResponseHeaderTimeout=0 语义一致)。
+// 成功时返回的 cancel 与响应体生命周期一致,调用方在响应体消费完毕后必须调用。
+func doWithHeaderTimeout(ctx context.Context, client *http.Client, req *http.Request, headerTimeout time.Duration) (*http.Response, context.CancelCauseFunc, error) {
+	attemptCtx, cancelAttempt := context.WithCancelCause(ctx)
+	req = req.WithContext(attemptCtx)
+
+	var headerTimer *time.Timer
+	if headerTimeout > 0 {
+		headerTimer = time.AfterFunc(headerTimeout, func() {
+			cancelAttempt(errResponseHeaderTimeout)
+		})
+	}
+
+	res, err := client.Do(req)
+	if err != nil {
+		if headerTimer != nil {
+			headerTimer.Stop()
+			if context.Cause(attemptCtx) == errResponseHeaderTimeout {
+				err = errResponseHeaderTimeout
+			}
+		}
+		cancelAttempt(nil)
+		return nil, nil, err
+	}
+	if headerTimer != nil {
+		headerTimer.Stop()
+	}
+	// 成功路径不 cancelAttempt:cancel 会中断后续 body 读取。
+	return res, cancelAttempt, nil
+}
+
+// BalanceChat 按负载均衡策略转发请求。
+// 返回的 cancel 与响应体生命周期一致,调用方在响应体消费完毕后必须调用,
+// 以释放按请求包装的上游 context。
+func BalanceChat(ctx context.Context, start time.Time, style string, before Before, providersWithMeta ProvidersWithMeta, reqMeta models.ReqMeta) (*http.Response, *models.ChatLog, context.CancelCauseFunc, error) {
 	slog.Info("request", "model", before.Model, "stream", before.Stream, "tool_call", before.toolCall, "structured_output", before.structuredOutput, "image", before.image)
 
 	providerMap := providersWithMeta.ProviderMap
@@ -48,19 +88,16 @@ func BalanceChat(ctx context.Context, start time.Time, style string, before Befo
 		balancer = balancers.BalancerWrapperBreaker(balancer)
 	}
 
-	// 设置请求超时
+	// 响应头阶段超时:仅约束等待响应头的时间,收到响应头即停止计时,
+	// 不限制流式 body 的传输时长;首字延迟高的推理模型也能在预算内建立流。
 	responseHeaderTimeout := time.Second * time.Duration(providersWithMeta.TimeOut)
-	// 流式超时时间缩短
-	if before.Stream {
-		responseHeaderTimeout = responseHeaderTimeout / 3
-	}
 
 	authKeyID, _ := ctx.Value(consts.ContextKeyAuthKeyID).(uint)
 	authKeyIOLog, _ := ctx.Value(consts.ContextKeyAuthKeyIOLog).(bool)
 
 	traceID, err := token.GenerateRandomChars(10)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	timer := time.NewTimer(time.Second * time.Duration(providersWithMeta.TimeOut))
@@ -68,14 +105,14 @@ func BalanceChat(ctx context.Context, start time.Time, style string, before Befo
 	for retry := range providersWithMeta.MaxRetry {
 		select {
 		case <-ctx.Done():
-			return nil, nil, ctx.Err()
+			return nil, nil, nil, ctx.Err()
 		case <-timer.C:
-			return nil, nil, errors.New("retry time out")
+			return nil, nil, nil, errors.New("retry time out")
 		default:
 			// 加权负载均衡
 			id, err := balancer.Pop()
 			if err != nil {
-				return nil, nil, fmt.Errorf("balancer pop err: %v, traceID: %s", err, traceID)
+				return nil, nil, nil, fmt.Errorf("balancer pop err: %v, traceID: %s", err, traceID)
 			}
 
 			modelWithProvider, ok := providersWithMeta.ModelWithProviderMap[id]
@@ -89,10 +126,10 @@ func BalanceChat(ctx context.Context, start time.Time, style string, before Befo
 
 			chatModel, err := providers.New(provider.Type, provider.Config, provider.Proxy)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 
-			client := providers.GetClient(responseHeaderTimeout, provider.Proxy)
+			client := providers.GetClient(provider.Proxy)
 
 			slog.Info("using provider", "provider", provider.Name, "model", modelWithProvider.ProviderModel)
 
@@ -134,13 +171,16 @@ func BalanceChat(ctx context.Context, start time.Time, style string, before Befo
 				continue
 			}
 
-			res, err := client.Do(req)
+			// 仅响应头阶段的超时:收到响应头后停止计时,后续 body 传输不受影响。
+			res, cancelAttempt, err := doWithHeaderTimeout(ctx, client, req, responseHeaderTimeout)
 			if err != nil {
 				retryLog <- log.WithError(err)
 				// 请求失败 移除待选
 				balancer.Delete(id)
 				continue
 			}
+			// 此处不 cancelAttempt:cancel 会中断后续 body 读取,
+			// 由调用方在响应体消费完毕后调用。
 
 			if res.StatusCode != http.StatusOK {
 				byteBody, err := io.ReadAll(res.Body)
@@ -157,6 +197,7 @@ func BalanceChat(ctx context.Context, start time.Time, style string, before Befo
 					balancer.Delete(id)
 				}
 				res.Body.Close()
+				cancelAttempt(nil)
 				continue
 			}
 
@@ -169,6 +210,7 @@ func BalanceChat(ctx context.Context, start time.Time, style string, before Befo
 						retryLog <- log.WithError(fmt.Errorf("read body failed: %w", err))
 						balancer.Delete(id)
 						res.Body.Close()
+						cancelAttempt(nil)
 						continue
 					}
 
@@ -176,6 +218,7 @@ func BalanceChat(ctx context.Context, start time.Time, style string, before Befo
 						retryLog <- log.WithError(fmt.Errorf("response matched provider error sample %q, body: %s", sample, string(byteBody)))
 						balancer.Delete(id)
 						res.Body.Close()
+						cancelAttempt(nil)
 						continue
 					}
 
@@ -185,11 +228,11 @@ func BalanceChat(ctx context.Context, start time.Time, style string, before Befo
 
 			balancer.Success(id)
 
-			return res, &log, nil
+			return res, &log, cancelAttempt, nil
 		}
 	}
 
-	return nil, nil, fmt.Errorf("All retry failed, trace ID: %s", traceID)
+	return nil, nil, nil, fmt.Errorf("All retry failed, trace ID: %s", traceID)
 }
 
 func buildUpstreamBody(raw []byte, extraBody map[string]any) ([]byte, error) {
