@@ -32,7 +32,8 @@
     "add_association": "Add Association",
     "add_model": "Add Model",
     "delete_model": "Delete model",
-    "refresh_status": "Refresh Status"
+    "refresh_status": "Refresh Status",
+    "copy_model_name": "Copy model name"
   },
   "order": {
     "hint": "Drag, or press Alt+↑ / Alt+↓ to reorder models",
@@ -217,7 +218,9 @@
     "model_deleted": "Model {{name}} deleted successfully",
     "model_delete_failed": "Failed to delete model: {{message}}",
     "association_delete_failed": "Failed to delete association: {{message}}",
-    "order_save_failed": "Failed to save order: {{message}}"
+    "order_save_failed": "Failed to save order: {{message}}",
+    "copy_model": "Copied model name: {{name}}",
+    "copy_failed": "Copy failed"
   },
   "validation": {
     "name_required": "Name is required",

@@ -1,4 +1,4 @@
-import { Link, ListCollapse, Pencil, Trash2 } from "lucide-react"
+import { Copy, Link, ListCollapse, Pencil, Trash2 } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
 import Loading from "@/components/loading"
@@ -44,6 +44,8 @@ type Props = {
   associationCountText: (modelId: number) => string
   order: ModelOrder
   onSelect: (modelId: number) => void
+  /** 快速复制模型名；复制反馈（toast）由页面统一处理，组件只管触发 */
+  onCopyModelName: (name: string) => void
   onEdit: (model: Model) => void
   onAddAssociation: (modelId: number) => void
   onDelete: (modelId: number) => void
@@ -65,6 +67,7 @@ export function ModelList({
   associationCountText,
   order,
   onSelect,
+  onCopyModelName,
   onEdit,
   onAddAssociation,
   onDelete,
@@ -125,7 +128,7 @@ export function ModelList({
                         const row = event.currentTarget
                         if (order.onKeyDown(event, model.ID)) restoreFocus(row, model.ID)
                       }}
-                      className={`cursor-pointer transition-colors ${
+                      className={`group cursor-pointer transition-colors ${
                         order.draggingModelId === model.ID ? "opacity-60 ring-1 ring-primary/60" : ""
                       } ${
                         order.dragOverModelId === model.ID && order.draggingModelId !== model.ID ? "bg-accent/40" : ""
@@ -136,7 +139,24 @@ export function ModelList({
                       }}
                     >
                       <TableCell className="font-mono text-xs text-muted-foreground">{model.ID}</TableCell>
-                      <TableCell className="font-medium">{model.Name}</TableCell>
+                      <TableCell className="font-medium max-w-[320px]">
+                        <div className="flex items-center gap-1">
+                          <span className="truncate min-w-0" title={model.Name}>{model.Name}</span>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              onCopyModelName(model.Name);
+                            }}
+                            title={t("actions.copy_model_name")}
+                            aria-label={t("actions.copy_model_name")}
+                          >
+                            <Copy className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
+                      </TableCell>
                       <TableCell className="max-w-[240px] truncate text-sm" title={model.Remark || "-"}>
                         {model.Remark || "-"}
                       </TableCell>
@@ -229,7 +249,19 @@ export function ModelList({
               >
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0 flex-1">
-                    <h3 className="font-semibold text-sm truncate">{model.Name}</h3>
+                    <div className="flex items-center gap-1">
+                      <h3 className="font-semibold text-sm truncate min-w-0">{model.Name}</h3>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6 shrink-0"
+                        onClick={() => onCopyModelName(model.Name)}
+                        title={t("actions.copy_model_name")}
+                        aria-label={t("actions.copy_model_name")}
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
                     <p className="text-[11px] text-muted-foreground">{t("model_table.model_id", { id: model.ID })}</p>
                   </div>
                   <div className="flex gap-1.5">

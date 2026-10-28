@@ -274,6 +274,24 @@ describe("模型路由页 · 有数据", () => {
     await waitFor(() => expect(mocked.getModelProviders).toHaveBeenCalledWith(1))
   })
 
+  it("点复制按钮把模型名写进剪贴板，且不触发行点击进关联", async () => {
+    const user = userEvent.setup()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    // jsdom 默认非安全上下文且没有 clipboard，补上才能走 utils 里的异步复制路径
+    Object.defineProperty(window, "isSecureContext", { value: true, configurable: true })
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true })
+    mocked.getModelOptions.mockResolvedValue([model({ ID: 1, Name: "gpt-test" })])
+
+    renderPage()
+    const list = await table()
+
+    await user.click(within(list).getByRole("button", { name: "复制模型名" }))
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("gpt-test"))
+    // stopPropagation 生效：仍停留在列表视图，没有进入关联
+    expect(screen.queryByRole("button", { name: /返回模型列表/ })).not.toBeInTheDocument()
+  })
+
   it("带 modelId 直接打开时直接进关联视图", async () => {
     renderPage("/model-providers?modelId=1")
     // 先等关联视图的返回入口，再取表：模型列表那张表会先出现再被替换掉

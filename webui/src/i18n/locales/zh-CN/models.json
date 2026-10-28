@@ -32,7 +32,8 @@
     "add_association": "添加关联",
     "add_model": "添加模型",
     "delete_model": "删除模型",
-    "refresh_status": "刷新状态"
+    "refresh_status": "刷新状态",
+    "copy_model_name": "复制模型名"
   },
   "order": {
     "hint": "拖拽或用 Alt+↑ / Alt+↓ 调整模型顺序",
@@ -217,7 +218,9 @@
     "model_deleted": "模型 {{name}} 删除成功",
     "model_delete_failed": "删除模型失败: {{message}}",
     "association_delete_failed": "删除关联失败: {{message}}",
-    "order_save_failed": "保存排序失败: {{message}}"
+    "order_save_failed": "保存排序失败: {{message}}",
+    "copy_model": "已复制模型名称: {{name}}",
+    "copy_failed": "复制失败"
   },
   "validation": {
     "name_required": "名称不能为空",

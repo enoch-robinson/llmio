@@ -26,6 +26,7 @@ import { useModelEditor } from "@/routes/model-providers/use-model-editor";
 import { ModelProviderFormDialog } from "@/routes/model-providers/model-provider-form-dialog";
 import { ModelProviderTestDialog } from "@/routes/model-providers/model-provider-test-dialog";
 import { ModelList } from "@/routes/model-providers/model-list";
+import { copyToClipboard } from "@/lib/utils";
 import { AssociationList } from "@/routes/model-providers/association-list";
 import { ModelDeleteDialog, ModelFormDialog } from "@/routes/model-providers/model-dialogs";
 
@@ -434,6 +435,15 @@ export default function ModelProvidersPage() {
     setDeleteId(id);
   };
 
+  const copyModelName = async (modelName: string) => {
+    try {
+      await copyToClipboard(modelName);
+      toast.success(t("toast.copy_model", { name: modelName }));
+    } catch {
+      toast.error(t("toast.copy_failed"));
+    }
+  };
+
   const handleModelSelect = (modelId: number) => {
     if (modelId === selectedModelId) return;
     setLoading(true);
@@ -665,6 +675,7 @@ export default function ModelProvidersPage() {
           associationCountText={getAssociationCountNumberText}
           order={order}
           onSelect={handleModelSelect}
+          onCopyModelName={copyModelName}
           onEdit={modelEditor.openEdit}
           onAddAssociation={openCreateDialog}
           onDelete={setModelDeleteId}
