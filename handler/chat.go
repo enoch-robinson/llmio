@@ -142,6 +142,11 @@ func chatHandler(c *gin.Context, preProcessor service.Beforer, postProcessor ser
 	tee := io.TeeReader(res.Body, pw)
 	// 异步处理输出并记录 tokens
 	authKeyIOLog, _ := ctx.Value(consts.ContextKeyAuthKeyIOLog).(bool)
+	if !authKeyIOLog {
+		// ioLog 关闭时日志协程用不到原始请求体：提前解除引用，免得大 body
+		// 被 pin 到整条响应流结束。
+		before.ClearRaw()
+	}
 	slog.Info("start recording log", "logId", logId, "authKeyIOLog", authKeyIOLog)
 	go service.RecordLog(context.Background(), startReq, pr, postProcessor, logId, *before, authKeyIOLog, bridgeNotes)
 	writeHeader(c, before.Stream, res.Header)

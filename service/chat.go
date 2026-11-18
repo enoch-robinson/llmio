@@ -581,7 +581,7 @@ func RecordLog(ctx context.Context, reqStart time.Time, reader io.ReadCloser, pr
 		}
 	}
 
-	log, output, err := processer(ctx, reader, before.Stream, reqStart)
+	log, output, err := processer(ctx, reader, before.Stream, reqStart, ioStored)
 	if err != nil {
 		// 这里的 err 多半已经被上层（handler 的 io.Copy）打过阶段标记，
 		// MarkStage 幂等会原样放行；只有 processer 自己新产生的错误

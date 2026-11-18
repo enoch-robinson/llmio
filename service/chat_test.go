@@ -140,7 +140,7 @@ func TestBuildHeadersKeepsGzipResponseReadable(t *testing.T) {
 	}
 
 	// 与 handler/chat.go 一致：用 Processer 解析原始响应体
-	log, output, err := ProcesserOpenAI(context.Background(), res.Body, false, time.Now())
+	log, output, err := ProcesserOpenAI(context.Background(), res.Body, false, time.Now(), true)
 	if err != nil {
 		t.Fatalf("ProcesserOpenAI() error = %v", err)
 	}

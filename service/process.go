@@ -20,9 +20,11 @@ const (
 	MaxScannerBufferSize  = 1024 * 1024 * 64 // 64MB
 )
 
-type Processer func(ctx context.Context, pr io.Reader, stream bool, start time.Time) (*models.ChatLog, *models.OutputUnion, error)
+// Processer 从响应流解析日志行与 token 用量。keepOutput 为 false 时（ioLog
+// 关闭，解析产物不会被持久化）跳过整份响应体的累积，只保留统计所需的部分。
+type Processer func(ctx context.Context, pr io.Reader, stream bool, start time.Time, keepOutput bool) (*models.ChatLog, *models.OutputUnion, error)
 
-func ProcesserOpenAI(ctx context.Context, pr io.Reader, stream bool, start time.Time) (*models.ChatLog, *models.OutputUnion, error) {
+func ProcesserOpenAI(ctx context.Context, pr io.Reader, stream bool, start time.Time, keepOutput bool) (*models.ChatLog, *models.OutputUnion, error) {
 	// 首字时延
 	var firstChunkTime time.Duration
 	var once sync.Once
@@ -39,7 +41,9 @@ func ProcesserOpenAI(ctx context.Context, pr io.Reader, stream bool, start time.
 			firstChunkTime = time.Since(start)
 		})
 		if !stream {
-			output.OfString = chunk
+			if keepOutput {
+				output.OfString = chunk
+			}
 			usageStr = gjson.Get(chunk, "usage").String()
 			break
 		}
@@ -52,7 +56,9 @@ func ProcesserOpenAI(ctx context.Context, pr io.Reader, stream bool, start time.
 		if errStr.Exists() {
 			return nil, nil, errors.New(errStr.String())
 		}
-		output.OfStringArray = append(output.OfStringArray, chunk)
+		if keepOutput {
+			output.OfStringArray = append(output.OfStringArray, chunk)
+		}
 
 		// OpenAI reports a final snapshot; compatible providers may repeat cumulative
 		// snapshots. Keep the latest explicit total, including zero, and ignore null.
@@ -104,7 +110,7 @@ type AnthropicUsage struct {
 	ServiceTier              string `json:"service_tier"`
 }
 
-func ProcesserOpenAiRes(ctx context.Context, pr io.Reader, stream bool, start time.Time) (*models.ChatLog, *models.OutputUnion, error) {
+func ProcesserOpenAiRes(ctx context.Context, pr io.Reader, stream bool, start time.Time, keepOutput bool) (*models.ChatLog, *models.OutputUnion, error) {
 	// 首字时延
 	var firstChunkTime time.Duration
 	var once sync.Once
@@ -122,7 +128,9 @@ func ProcesserOpenAiRes(ctx context.Context, pr io.Reader, stream bool, start ti
 			firstChunkTime = time.Since(start)
 		})
 		if !stream {
-			output.OfString = chunk
+			if keepOutput {
+				output.OfString = chunk
+			}
 			usageStr = gjson.Get(chunk, "usage").String()
 			break
 		}
@@ -135,7 +143,9 @@ func ProcesserOpenAiRes(ctx context.Context, pr io.Reader, stream bool, start ti
 		if content == "" {
 			continue
 		}
-		output.OfStringArray = append(output.OfStringArray, content)
+		if keepOutput {
+			output.OfStringArray = append(output.OfStringArray, content)
+		}
 		if event == "response.completed" {
 			usageStr = gjson.Get(content, "response.usage").String()
 		}
@@ -170,7 +180,7 @@ func ProcesserOpenAiRes(ctx context.Context, pr io.Reader, stream bool, start ti
 	}, &output, nil
 }
 
-func ProcesserAnthropic(ctx context.Context, pr io.Reader, stream bool, start time.Time) (*models.ChatLog, *models.OutputUnion, error) {
+func ProcesserAnthropic(ctx context.Context, pr io.Reader, stream bool, start time.Time, keepOutput bool) (*models.ChatLog, *models.OutputUnion, error) {
 	// 首字时延
 	var firstChunkTime time.Duration
 	var once sync.Once
@@ -190,7 +200,9 @@ func ProcesserAnthropic(ctx context.Context, pr io.Reader, stream bool, start ti
 			firstChunkTime = time.Since(start)
 		})
 		if !stream {
-			output.OfString = chunk
+			if keepOutput {
+				output.OfString = chunk
+			}
 			usageStr = gjson.Get(chunk, "usage").String()
 			break
 		}
@@ -205,7 +217,9 @@ func ProcesserAnthropic(ctx context.Context, pr io.Reader, stream bool, start ti
 			continue
 		}
 
-		output.OfStringArray = append(output.OfStringArray, after)
+		if keepOutput {
+			output.OfStringArray = append(output.OfStringArray, after)
+		}
 		switch event {
 		case "message_start":
 			usageStr = gjson.Get(after, "message.usage").String()
@@ -253,7 +267,7 @@ func ProcesserAnthropic(ctx context.Context, pr io.Reader, stream bool, start ti
 	}, &output, nil
 }
 
-func ProcesserGemini(ctx context.Context, pr io.Reader, stream bool, start time.Time) (*models.ChatLog, *models.OutputUnion, error) {
+func ProcesserGemini(ctx context.Context, pr io.Reader, stream bool, start time.Time, keepOutput bool) (*models.ChatLog, *models.OutputUnion, error) {
 	// 首字时延
 	var firstChunkTime time.Duration
 	var once sync.Once
@@ -271,7 +285,9 @@ func ProcesserGemini(ctx context.Context, pr io.Reader, stream bool, start time.
 		once.Do(func() {
 			firstChunkTime = time.Since(start)
 		})
-		output.OfString = string(bodyBytes)
+		if keepOutput {
+			output.OfString = string(bodyBytes)
+		}
 
 		usageStr = gjson.GetBytes(bodyBytes, "usageMetadata").String()
 
@@ -309,7 +325,9 @@ func ProcesserGemini(ctx context.Context, pr io.Reader, stream bool, start time.
 				return nil, nil, errors.New(errStr.String())
 			}
 
-			output.OfStringArray = append(output.OfStringArray, payload)
+			if keepOutput {
+				output.OfStringArray = append(output.OfStringArray, payload)
+			}
 			usageMetadata := gjson.Get(payload, "usageMetadata")
 			if usageMetadata.Exists() && usageMetadata.Get("totalTokenCount").Int() != 0 {
 				usageStr = usageMetadata.String()

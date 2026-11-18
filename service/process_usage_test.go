@@ -33,7 +33,7 @@ func wantUsage(prompt, completion, cached int64) models.Usage {
 
 func checkUsage(t *testing.T, processor Processer, body string, stream bool, want models.Usage) {
 	t.Helper()
-	log, output, err := processor(context.Background(), strings.NewReader(body), stream, time.Now())
+	log, output, err := processor(context.Background(), strings.NewReader(body), stream, time.Now(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,6 +53,92 @@ func checkUsage(t *testing.T, processor Processer, body string, stream bool, wan
 		if !slices.Equal(output.OfStringArray, payloads) {
 			t.Fatal("streaming response payloads were changed")
 		}
+	}
+}
+
+// TestProcesserSkipOutput 锁住 keepOutput=false 的契约：ioLog 关闭时输出累积
+// 被跳过，但 usage、size、首包时延这些统计仍照常解析。四个 processer 各覆
+// 盖一条路径。
+func TestProcesserSkipOutput(t *testing.T) {
+	t.Run("anthropic stream", func(t *testing.T) {
+		body := usageStream(`{"input_tokens":23,"cache_read_input_tokens":7}`, `{"output_tokens":8}`)
+		log, output, err := ProcesserAnthropic(context.Background(), strings.NewReader(body), true, time.Now(), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(output.OfStringArray) != 0 || output.OfString != "" {
+			t.Fatalf("keepOutput=false 不应累积输出，实得 %+v", output)
+		}
+		if want := wantUsage(23+7, 8, 7); log.Usage != want {
+			t.Fatalf("usage = %+v; want %+v", log.Usage, want)
+		}
+		if log.Size == 0 {
+			t.Fatal("keepOutput=false 不该丢掉 size 统计")
+		}
+	})
+
+	t.Run("openai nonstream", func(t *testing.T) {
+		body := `{"usage":{"prompt_tokens":23,"completion_tokens":8,"total_tokens":31}}`
+		log, output, err := ProcesserOpenAI(context.Background(), strings.NewReader(body), false, time.Now(), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if output.OfString != "" {
+			t.Fatalf("keepOutput=false 不应累积非流式输出，实得 %q", output.OfString)
+		}
+		if want := wantUsage(23, 8, 0); log.Usage != want {
+			t.Fatalf("usage = %+v; want %+v", log.Usage, want)
+		}
+	})
+
+	t.Run("openaires stream", func(t *testing.T) {
+		body := "event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":9,\"output_tokens\":3,\"total_tokens\":12}}}\n\n"
+		log, output, err := ProcesserOpenAiRes(context.Background(), strings.NewReader(body), true, time.Now(), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(output.OfStringArray) != 0 {
+			t.Fatalf("keepOutput=false 不应累积输出，实得 %d 条", len(output.OfStringArray))
+		}
+		if log.Usage.PromptTokens != 9 || log.Usage.CompletionTokens != 3 || log.Usage.TotalTokens != 12 {
+			t.Fatalf("usage = %+v, want 9/3/12", log.Usage)
+		}
+	})
+
+	t.Run("gemini stream", func(t *testing.T) {
+		body := "data: {\"candidates\":[],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":2,\"totalTokenCount\":7}}\n\n"
+		log, output, err := ProcesserGemini(context.Background(), strings.NewReader(body), true, time.Now(), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(output.OfStringArray) != 0 {
+			t.Fatalf("keepOutput=false 不应累积输出，实得 %d 条", len(output.OfStringArray))
+		}
+		if want := (models.Usage{PromptTokens: 5, CompletionTokens: 2, TotalTokens: 7}); log.Usage != want {
+			t.Fatalf("usage = %+v; want %+v", log.Usage, want)
+		}
+	})
+}
+
+// BenchmarkProcesserKeepOutput 量化 ioLog 关闭时跳过累积的收益：同一份 ~2MB
+// 的流式响应，keep=true 是现有 ioLog 开启路径，keep=false 是 ioLog 关闭路径。
+func BenchmarkProcesserKeepOutput(b *testing.B) {
+	var sb strings.Builder
+	chunk := "event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hello world "}}` + "\n\n"
+	for sb.Len() < 2<<20 {
+		sb.WriteString(chunk)
+	}
+	body := sb.String()
+	for _, keep := range []bool{true, false} {
+		b.Run(map[bool]string{true: "keep", false: "skip"}[keep], func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if _, _, err := ProcesserAnthropic(context.Background(), strings.NewReader(body), true, time.Now(), keep); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
 

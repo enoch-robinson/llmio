@@ -211,7 +211,7 @@ func TestRecordLogPreservesBackupFlag(t *testing.T) {
 		t.Fatalf("SaveChatLog() error: %v", err)
 	}
 
-	processer := func(_ context.Context, _ io.Reader, _ bool, _ time.Time) (*models.ChatLog, *models.OutputUnion, error) {
+	processer := func(_ context.Context, _ io.Reader, _ bool, _ time.Time, _ bool) (*models.ChatLog, *models.OutputUnion, error) {
 		return &models.ChatLog{FirstChunkTime: time.Second, Size: 7}, &models.OutputUnion{}, nil
 	}
 	RecordLog(ctx, time.Now(), io.NopCloser(strings.NewReader("data")), processer, logId, Before{}, false, NewBridgeNotes())
