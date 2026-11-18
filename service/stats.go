@@ -1,6 +1,7 @@
 package service
 
 import (
+	"container/heap"
 	"context"
 	"fmt"
 	"math"
@@ -609,9 +610,9 @@ func aggregateWithBucketIter(f StatsFilter, bucket time.Duration, next statsLogI
 		errOrder        []string
 		errBuckets      = map[int64]int64{}
 		errBucketOrder  []int64
-		leaderTps       []LogRow
-		leaderSlow      []LogRow
-		leaderRecentErr []LogRow
+		leaderTps       = newLeaderTopK(leaderboardLimit)
+		leaderSlow      = newLeaderTopK(leaderboardLimit)
+		leaderRecentErr = newLeaderTopK(leaderboardLimit)
 	)
 
 	for l, ok := next(); ok; l, ok = next() {
@@ -634,7 +635,9 @@ func aggregateWithBucketIter(f StatsFilter, bucket time.Duration, next statsLogI
 		res.KPI.TotalTokens += l.TotalTokens
 		res.KPI.CachedTokens += l.PromptTokensDetails.CachedTokens
 		res.KPI.TotalRetries += int64(l.Retry)
-		res.KPI.Cost += Cost(l)
+		// 每行只算一次：KPI、时间序列与分组共用同一结果。
+		cost := Cost(l)
+		res.KPI.Cost += cost
 		// 币种取首条非空值：单价是快照，同一批数据通常同一币种。
 		if res.KPI.Currency == "" && l.Currency != "" {
 			res.KPI.Currency = l.Currency
@@ -671,7 +674,7 @@ func aggregateWithBucketIter(f StatsFilter, bucket time.Duration, next statsLogI
 		p.Prompt += l.PromptTokens
 		p.Completion += l.CompletionTokens
 		p.Cached += l.PromptTokensDetails.CachedTokens
-		p.Cost += Cost(l)
+		p.Cost += cost
 		p.AvgTps += l.Tps
 		p.AvgFirstChunkMs += fcMs
 
@@ -691,15 +694,16 @@ func aggregateWithBucketIter(f StatsFilter, bucket time.Duration, next statsLogI
 		// 抹平，byProvider 把模型抹平。两路联合各自归组，互不合并。
 		// 分量字段按 addJoint 的实参就位：Model 装上游模型名、Provider 装
 		// 提供商名，展示侧按提供商归组由前端决定。
-		models.add(l.ProviderModel, l)
-		providers.add(l.ProviderName, l)
-		modelProviders.addJoint(l.Name, l.ProviderName, l)
+		keyName := keyLabel(l.AuthKeyID)
+		models.add(l.ProviderModel, l, cost)
+		providers.add(l.ProviderName, l, cost)
+		modelProviders.addJoint(l.Name, l.ProviderName, l, cost)
 		// 供应商×上游模型：第一分量是实发的模型 id，第二分量是实际接单的供应商。
 		// provider_name 为空的行归 "-"（与其它分组的兜底一致）。
-		providerModels.addJoint(l.ProviderModel, l.ProviderName, l)
-		keys.add(keyLabel(l.AuthKeyID), l)
-		names.add(l.Name, l)
-		uas.add(l.UserAgent, l)
+		providerModels.addJoint(l.ProviderModel, l.ProviderName, l, cost)
+		keys.add(keyName, l, cost)
+		names.add(l.Name, l, cost)
+		uas.add(l.UserAgent, l, cost)
 
 		// ---- 错误 ----
 		if l.Status == consts.StatusError {
@@ -736,7 +740,7 @@ func aggregateWithBucketIter(f StatsFilter, bucket time.Duration, next statsLogI
 			Model:           l.ProviderModel,
 			RequestName:     l.Name,
 			Provider:        l.ProviderName,
-			KeyName:         keyLabel(l.AuthKeyID),
+			KeyName:         keyName,
 			Tps:             l.Tps,
 			FirstChunkMs:    fcMs,
 			CompletionToken: l.CompletionTokens,
@@ -745,11 +749,11 @@ func aggregateWithBucketIter(f StatsFilter, bucket time.Duration, next statsLogI
 			Retry:           l.Retry,
 		}
 		if l.Status == consts.StatusSuccess {
-			leaderTps = append(leaderTps, row)
-			leaderSlow = append(leaderSlow, row)
+			leaderTps.add(row, l.Tps)
+			leaderSlow.add(row, fcMs)
 		}
 		if l.Status == consts.StatusError {
-			leaderRecentErr = append(leaderRecentErr, row)
+			leaderRecentErr.add(row, float64(row.CreatedAt))
 		}
 	}
 
@@ -828,18 +832,103 @@ func aggregateWithBucketIter(f StatsFilter, bucket time.Duration, next statsLogI
 	}
 
 	// ---- 排行榜：TPS 降序 / 首包耗时降序 / 时间倒序 ----
-	sort.SliceStable(leaderTps, func(i, j int) bool { return leaderTps[i].Tps > leaderTps[j].Tps })
-	res.TopTps = head(leaderTps, leaderboardLimit)
-	sort.SliceStable(leaderSlow, func(i, j int) bool {
-		return leaderSlow[i].FirstChunkMs > leaderSlow[j].FirstChunkMs
-	})
-	res.Slowest = head(leaderSlow, leaderboardLimit)
-	sort.SliceStable(leaderRecentErr, func(i, j int) bool {
-		return leaderRecentErr[i].CreatedAt > leaderRecentErr[j].CreatedAt
-	})
-	res.RecentError = head(leaderRecentErr, leaderboardLimit)
+	res.TopTps = leaderTps.result()
+	res.Slowest = leaderSlow.result()
+	res.RecentError = leaderRecentErr.result()
 
 	return res
+}
+
+// ---------------------------------------------------------------------------
+// 有界排行榜
+// ---------------------------------------------------------------------------
+
+// leaderEntry 是有界排行榜里的一个候选行。seq 记录行的原始顺序（0 起的
+// 到达序号），分数并列时用它保持与全量 SliceStable 稳定排序一致的
+// "先到者在前" 次序。
+type leaderEntry struct {
+	row   LogRow
+	score float64
+	seq   int
+}
+
+// leaderWorse 判断 a 是否比 b 更差（更该被淘汰）：分数低者差；并列分时
+// 后到者差——与原先对全量切片做稳定排序的并列语义一致。
+func leaderWorse(a, b leaderEntry) bool {
+	if a.score != b.score {
+		return a.score < b.score
+	}
+	return a.seq > b.seq
+}
+
+// leaderHeap 是按 leaderWorse 组织的最小堆：堆顶永远是当前最差的一条。
+type leaderHeap []leaderEntry
+
+func (h leaderHeap) Len() int           { return len(h) }
+func (h leaderHeap) Less(i, j int) bool { return leaderWorse(h[i], h[j]) }
+func (h leaderHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *leaderHeap) Push(x any)        { *h = append(*h, x.(leaderEntry)) }
+func (h *leaderHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
+}
+
+// leaderTopK 是容量为 limit 的有界排行榜：逐行喂入 add，result 直接给出与
+// "全量收集 + SliceStable 降序 + 取前 limit 条" 完全相同的行与次序。
+//
+// 之前每条成功行都被 append 进两份完整 LogRow 切片（错误行再进一份），
+// 收尾时全量排序后只取前 10 条——常驻内存与窗口行数成正比，90k 行窗口
+// 实测约 35MB。改为滚动淘汰后常驻只剩堆内的 K 条。
+//
+// 三个榜（TPS / 首包耗时 / 最近错误）共用它，只差分数：最近错误榜的分数是
+// CreatedAt。之所以不用普通覆写 ring buffer：生产流按 created_at DESC 供给，
+// 最新行先到，覆写式 ring buffer 留下的会是窗口里**最旧**的 10 条错误，
+// "最近错误" 语义整个反转；按 CreatedAt 淘汰的有界堆对任意输入顺序都与
+// 原契约逐行一致。
+type leaderTopK struct {
+	heap  leaderHeap
+	limit int
+	seq   int
+}
+
+func newLeaderTopK(limit int) leaderTopK { return leaderTopK{limit: limit} }
+
+// add 喂入一行。堆满且新行比堆顶更好时淘汰堆顶；并列分的新行永远输给
+// 已在堆内的行（seq 更大），先到者得以保留。
+func (k *leaderTopK) add(row LogRow, score float64) {
+	if k.limit <= 0 {
+		return
+	}
+	k.seq++
+	e := leaderEntry{row: row, score: score, seq: k.seq}
+	if len(k.heap) < k.limit {
+		heap.Push(&k.heap, e)
+		return
+	}
+	if leaderWorse(k.heap[0], e) {
+		k.heap[0] = e
+		heap.Fix(&k.heap, 0)
+	}
+}
+
+// result 输出前 limit 条：分数降序，并列分按原始行序（seq 升序）。每个榜
+// 只在聚合收尾时调用一次，因此可以对堆底层数组原地排序。
+func (k *leaderTopK) result() []LogRow {
+	entries := k.heap
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].score != entries[j].score {
+			return entries[i].score > entries[j].score
+		}
+		return entries[i].seq < entries[j].seq
+	})
+	out := make([]LogRow, len(entries))
+	for i := range entries {
+		out[i] = entries[i].row
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -937,8 +1026,8 @@ type groupItem struct {
 
 func newGroupAcc() *groupAcc { return &groupAcc{items: map[string]*groupItem{}} }
 
-func (a *groupAcc) add(name string, l models.ChatLog) {
-	a.count(a.item(name), l)
+func (a *groupAcc) add(name string, l models.ChatLog, cost float64) {
+	a.count(a.item(name), l, cost)
 }
 
 // addJoint 累计联合维度（请求名 × 提供商）这一维。
@@ -948,10 +1037,10 @@ func (a *groupAcc) add(name string, l models.ChatLog) {
 // 拆错了会把一个请求名的两行提供商分到两个组里，看起来像多了一个请求名。
 // 字段仍叫 Model，是历史命名（前端 groupByModel 早已按"联合维度的第一个
 // 分量"读它，不吃字面含义）。
-func (a *groupAcc) addJoint(model, provider string, l models.ChatLog) {
+func (a *groupAcc) addJoint(model, provider string, l models.ChatLog, cost float64) {
 	it := a.item(jointLabel(model, provider))
 	it.stat.Model, it.stat.Provider = dashIfEmpty(model), dashIfEmpty(provider)
-	a.count(it, l)
+	a.count(it, l, cost)
 }
 
 // jointLabel 是联合维度（请求名 × 提供商）的行名。
@@ -978,8 +1067,9 @@ func (a *groupAcc) item(name string) *groupItem {
 	return it
 }
 
-// count 把一条日志累计进分组。
-func (a *groupAcc) count(it *groupItem, l models.ChatLog) {
+// count 把一条日志累计进分组。cost 由调用方传入（每行只算一次），
+// 而不是在此处重复调 Cost。
+func (a *groupAcc) count(it *groupItem, l models.ChatLog, cost float64) {
 	s := &it.stat
 	s.Total++
 	switch l.Status {
@@ -995,7 +1085,7 @@ func (a *groupAcc) count(it *groupItem, l models.ChatLog) {
 	s.TotalTokens += l.TotalTokens
 	s.Cached += l.PromptTokensDetails.CachedTokens
 	s.Retries += int64(l.Retry)
-	s.Cost += Cost(l)
+	s.Cost += cost
 	if l.Tps > s.MaxTps {
 		s.MaxTps = l.Tps
 	}

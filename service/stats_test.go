@@ -1411,6 +1411,84 @@ func TestAggregateLeaderboardLimit(t *testing.T) {
 	}
 }
 
+// TestAggregateLeaderboardTieOrder 锁住排行榜的并列次序契约：分数并列时
+// 按原始行序（先到者在前）排序与保留。这是原实现 SliceStable 全量排序的
+// 行为承诺，改成有界堆淘汰后仍须逐行一致。
+func TestAggregateLeaderboardTieOrder(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 9, 29, 10, 0, 0, 0, time.UTC)
+	mk := func(id uint, tps float64) models.ChatLog {
+		l := logAt(id, base.Add(time.Duration(id)*time.Second), consts.StatusSuccess)
+		l.Tps = tps
+		return l
+	}
+
+	t.Run("并列分数按原始行序取前 K", func(t *testing.T) {
+		t.Parallel()
+
+		// ids 1..4 → 5 分，ids 5..10 → 9 分，ids 11/12 → 1/3 分。
+		// 降序稳定排序应为 9×6（ids 5..10）、5×4（ids 1..4）、3、1，前 10 条恰好截到 5 分组。
+		scores := map[uint]float64{1: 5, 2: 5, 3: 5, 4: 5, 11: 1, 12: 3}
+		logs := make([]models.ChatLog, 0, 12)
+		for i := uint(1); i <= 12; i++ {
+			v, ok := scores[i]
+			if !ok {
+				v = 9
+			}
+			logs = append(logs, mk(i, v))
+		}
+		res := AggregateWithBucket(logs, StatsFilter{}, time.Hour)
+		want := []uint{5, 6, 7, 8, 9, 10, 1, 2, 3, 4}
+		if len(res.TopTps) != len(want) {
+			t.Fatalf("应取前 %d 条，实得 %d", len(want), len(res.TopTps))
+		}
+		for i, id := range want {
+			if res.TopTps[i].ID != id {
+				t.Fatalf("第 %d 位应为 id %d，实得 %d", i, id, res.TopTps[i].ID)
+			}
+		}
+	})
+
+	t.Run("全部并列时保留先到的 K 行", func(t *testing.T) {
+		t.Parallel()
+
+		logs := make([]models.ChatLog, 0, 12)
+		for i := uint(1); i <= 12; i++ {
+			logs = append(logs, mk(i, 7))
+		}
+		res := AggregateWithBucket(logs, StatsFilter{}, time.Hour)
+		if len(res.TopTps) != leaderboardLimit {
+			t.Fatalf("应取前 %d 条，实得 %d", leaderboardLimit, len(res.TopTps))
+		}
+		for i, row := range res.TopTps {
+			if row.ID != uint(i+1) {
+				t.Fatalf("并列淘汰应保留先到行：第 %d 位应为 id %d，实得 %d", i, i+1, row.ID)
+			}
+		}
+	})
+
+	t.Run("同刻错误按原始行序取前 K", func(t *testing.T) {
+		t.Parallel()
+
+		logs := make([]models.ChatLog, 0, 12)
+		for i := uint(1); i <= 12; i++ {
+			l := logAt(i, base, consts.StatusError) // 同一时刻，只剩行序可分
+			l.Error = "status: 500, body: boom"
+			logs = append(logs, l)
+		}
+		res := AggregateWithBucket(logs, StatsFilter{}, time.Hour)
+		if len(res.RecentError) != leaderboardLimit {
+			t.Fatalf("应取前 %d 条，实得 %d", leaderboardLimit, len(res.RecentError))
+		}
+		for i, row := range res.RecentError {
+			if row.ID != uint(i+1) {
+				t.Fatalf("同刻错误应按原始行序：第 %d 位应为 id %d，实得 %d", i, i+1, row.ID)
+			}
+		}
+	})
+}
+
 func TestAggregateAppliesFilter(t *testing.T) {
 	t.Parallel()
 
