@@ -56,9 +56,7 @@ func checkUsage(t *testing.T, processor Processer, body string, stream bool, wan
 	}
 }
 
-// TestProcesserSkipOutput 锁住 keepOutput=false 的契约：ioLog 关闭时输出累积
-// 被跳过，但 usage、size、首包时延这些统计仍照常解析。四个 processer 各覆
-// 盖一条路径。
+// TestProcesserSkipOutput keepOutput=false 时输出累积被跳过，统计仍照常解析。
 func TestProcesserSkipOutput(t *testing.T) {
 	t.Run("anthropic stream", func(t *testing.T) {
 		body := usageStream(`{"input_tokens":23,"cache_read_input_tokens":7}`, `{"output_tokens":8}`)
@@ -120,8 +118,7 @@ func TestProcesserSkipOutput(t *testing.T) {
 	})
 }
 
-// BenchmarkProcesserKeepOutput 量化 ioLog 关闭时跳过累积的收益：同一份 ~2MB
-// 的流式响应，keep=true 是现有 ioLog 开启路径，keep=false 是 ioLog 关闭路径。
+// BenchmarkProcesserKeepOutput keep 两档的对照，~2MB 流式响应。
 func BenchmarkProcesserKeepOutput(b *testing.B) {
 	var sb strings.Builder
 	chunk := "event: content_block_delta\n" +

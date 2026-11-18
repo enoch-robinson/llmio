@@ -463,8 +463,6 @@ func TestResolveMultiplierUnknownTimezoneFallsBack(t *testing.T) {
 func TestTzLocationCache(t *testing.T) {
 	t.Parallel()
 
-	// 同名两次调用必须返回同一指针：缓存是 tzLocation 存在的全部意义，
-	// 若每次都回源 LoadLocation，热路径上每请求都要重付 tzdata 解析成本。
 	first := tzLocation("Asia/Shanghai")
 	if first == nil {
 		t.Fatalf("Asia/Shanghai 应能加载")

@@ -59,23 +59,13 @@ func InClockWindow(minutes, start, end int) bool {
 	if start < end {
 		return minutes >= start && minutes < end
 	}
-	// 跨零点
 	return minutes >= start || minutes < end
 }
 
-// defaultWorkdays 是 weekdays 未配置时的默认工作日。包级共享而非每次判定
-// 新建切片：判定在热路径与时间轴预览（逐分钟采样）上都被高频调用。
 var defaultWorkdays = []int{1, 2, 3, 4, 5}
 
-// IsWorkday 判断某个日期是否为工作日。
-//
-// 优先级：按日期的显式覆盖 > 星期几规则。
-// 覆盖必须优先，否则"周六调休上班"这类情况无法表达。
-//
-// 入参应已转换到配置时区。
+// IsWorkday 判断某个日期是否为工作日，日期覆盖优先于星期几规则。
 func (r PeakResolver) IsWorkday(t time.Time) bool {
-	// 未配置节假日覆盖时跳过 Format 与 map 查找：多数部署没有覆盖表，
-	// 而 Format 是这条路径上唯一的分配来源。
 	if len(r.cal.DateOverrides) > 0 {
 		if override, ok := r.cal.DateOverrides[t.Format("2006-01-02")]; ok {
 			switch override {
@@ -122,8 +112,7 @@ func (r PeakResolver) ResolvePeriod(t time.Time) *models.PeakPeriod {
 		if p.Workday != nil && *p.Workday != workday {
 			continue
 		}
-		// 坏时钟在构造时已标记 invalid：配置有误时跳过该时段而非整体失败，
-		// 一个写坏的时段不应让所有请求的成本计算都停摆。
+		// 坏时钟跳过该时段，不阻断整体判定
 		if !rc.valid {
 			continue
 		}
@@ -147,31 +136,23 @@ func (r PeakResolver) ResolveMultiplier(t time.Time) (float64, string) {
 	return p.Multiplier, p.Name
 }
 
-// PeakResolver 在条款与日历之上封装判定逻辑，避免每次判定都重复解析时区。
-//
-// 两份入参而不是一份：条款按上游走（哪几个小时算峰时），日历全局共用
-// （这一天是不是工作日）。判定要同时用到两者，但它们的归属不同。
+// PeakResolver 在条款与日历之上封装判定逻辑；条款按上游，日历全局共用。
 type PeakResolver struct {
 	terms models.PeakTerms
 	cal   models.PeakCalendar
-	// loc 是配置时区的预加载结果；nil 表示未配置或加载失败，判定按原值。
+	// loc 为 nil 表示时区未配置或加载失败，判定按原值。
 	loc *time.Location
-	// clocks 与 terms.Periods 一一对应的预解析时钟。判定在热路径与
-	// 时间轴预览（逐分钟采样 1440×days 次）上被高频调用，
-	// "HH:MM" 的字符串分割与转换不能留到每次判定。
+	// clocks 与 terms.Periods 一一对应的预解析时钟。
 	clocks []resolvedClock
 }
 
-// resolvedClock 是单个时段的预解析结果；valid=false 表示配置有误，
-// 判定时沿用「跳过该时段」语义。
 type resolvedClock struct {
 	period     *models.PeakPeriod
 	start, end int
 	valid      bool
 }
 
-// effectiveTime 与 models.PeakCalendar.EffectiveTime 语义一致，
-// 但时区只在构造时加载一次。
+// effectiveTime 与 models.PeakCalendar.EffectiveTime 语义一致，但时区只在构造时加载一次。
 func (r PeakResolver) effectiveTime(t time.Time) time.Time {
 	if r.loc == nil {
 		return t
@@ -179,14 +160,11 @@ func (r PeakResolver) effectiveTime(t time.Time) time.Time {
 	return t.In(r.loc)
 }
 
-// tzCache 按 IANA 名缓存 *time.Location。LoadLocation 每次调用都可能触发
-// tzdata 文件/内嵌数据解析（本机实测约 9µs/次，含 open 系统调用，占单次判定
-// CPU 的 ~78%），而热路径上 NewPeakResolver 每请求执行；时区名是配置枚举值，
-// 缓存集有界且 IANA 数据在进程生命周期内不变，故做进程级永久缓存。
+// tzCache 按 IANA 名缓存 *time.Location：LoadLocation 每次调用都可能重付
+// tzdata 解析（实测约 9µs，含 open 系统调用），而时区名是配置枚举值。
 var tzCache sync.Map
 
-// tzLocation 返回预加载的时区；未配置或加载失败回 nil，与 EffectiveTime
-// 的「加载失败按原值」语义一致。
+// tzLocation 未配置或加载失败时回 nil，判定按原值（与 EffectiveTime 一致）。
 func tzLocation(name string) *time.Location {
 	if name == "" {
 		return nil
@@ -202,8 +180,7 @@ func tzLocation(name string) *time.Location {
 	return v.(*time.Location)
 }
 
-// NewPeakResolver 构造判定器。时区加载与时钟解析在此一次性完成，
-// 构造成本与旧版单次判定的解析成本同量级，复用次数越多收益越大。
+// NewPeakResolver 构造判定器，时区加载与时钟解析在此一次性完成。
 func NewPeakResolver(terms models.PeakTerms, cal models.PeakCalendar) PeakResolver {
 	r := PeakResolver{terms: terms, cal: cal}
 	r.loc = tzLocation(cal.Timezone)
@@ -236,10 +213,6 @@ func containsInt(hay []int, needle int) bool {
 	return false
 }
 
-// ---------------------------------------------------------------------------
-// 时间轴预览
-// ---------------------------------------------------------------------------
-
 // SchedulePoint 是时间轴上的一段（同一时段连续区间的合并结果）。
 type SchedulePoint struct {
 	Start      int64   `json:"start"`      // Unix 毫秒
@@ -250,10 +223,7 @@ type SchedulePoint struct {
 }
 
 // PreviewSchedule 从 start 起按分钟步进采样 days 天，把相邻同结果的采样
-// 合并为连续区间返回。
-//
-// 合并而非逐分钟返回：一个月逐分钟是 4 万多条，前端画不出来也读不懂；
-// 合并成区间后通常只剩十几段，跨零点与调休造成的错位一眼可见。
+// 合并为连续区间返回（逐分钟是 4 万多条，前端读不懂；合并后通常只剩十几段）。
 func PreviewSchedule(r PeakResolver, start time.Time, days int) []SchedulePoint {
 	if days < 1 {
 		days = 1
@@ -293,14 +263,7 @@ func PreviewSchedule(r PeakResolver, start time.Time, days int) []SchedulePoint 
 	return out
 }
 
-// ---------------------------------------------------------------------------
-// 日历读取（带缓存）
-// ---------------------------------------------------------------------------
-
-// peakCacheTTL 日历缓存有效期。
-//
-// 分时段判定在每次代理请求的热路径上，不能每次都读库；但改配置后
-// 也不应等到重启才生效，因此用短 TTL 而非永久缓存。
+// peakCacheTTL 日历缓存有效期：判定在热路径上不能每次读库，短 TTL 保证改配置后及时生效。
 const peakCacheTTL = 30 * time.Second
 
 var (
@@ -310,8 +273,7 @@ var (
 	peakLoaded   bool
 )
 
-// GetPeakCalendar 读取全局工作日日历，带短 TTL 缓存。
-// 读取失败或配置为空时返回默认日历，保证热路径不会因配置问题中断。
+// GetPeakCalendar 读取全局工作日日历，带短 TTL 缓存；读取失败或配置为空时返回默认日历。
 func GetPeakCalendar(ctx context.Context) models.PeakCalendar {
 	peakMu.RLock()
 	if peakLoaded && time.Since(peakCachedAt) < peakCacheTTL {
@@ -335,7 +297,6 @@ func loadPeakCalendar(ctx context.Context) models.PeakCalendar {
 	var row models.Config
 	err := models.DB.WithContext(ctx).Where("key = ?", models.KeyPeakCalendar).First(&row).Error
 	if err != nil {
-		// 未配置或查询失败：回落到默认（东八区、周一至周五）
 		return models.DefaultPeakCalendar()
 	}
 	if strings.TrimSpace(row.Value) == "" {
@@ -343,7 +304,7 @@ func loadPeakCalendar(ctx context.Context) models.PeakCalendar {
 	}
 	var cfg models.PeakCalendar
 	if err := json.Unmarshal([]byte(row.Value), &cfg); err != nil {
-		// 日历损坏时回落到默认而非报错：计费配置不该让代理请求失败。
+		// 日历损坏时回落默认而非报错：计费配置不该让代理请求失败
 		return models.DefaultPeakCalendar()
 	}
 	if cfg.DateOverrides == nil {
@@ -352,7 +313,7 @@ func loadPeakCalendar(ctx context.Context) models.PeakCalendar {
 	return cfg
 }
 
-// InvalidatePeakCalendar 使日历缓存失效，供配置写入后调用。
+// InvalidatePeakCalendar 使日历缓存失效。
 func InvalidatePeakCalendar() {
 	peakMu.Lock()
 	peakLoaded = false
@@ -360,10 +321,8 @@ func InvalidatePeakCalendar() {
 	peakMu.Unlock()
 }
 
-// ApplyPeakMultiplier 把乘数应用到三档单价上。
-//
-// 这是价格进入 ChatLog 快照的唯一入口：日志记录的是**实际生效价**，
-// 因此历史成本不会被后来的配置修改改写，Cost() 也无需感知时段概念。
+// ApplyPeakMultiplier 把乘数应用到三档单价上；价格进入 ChatLog 快照的唯一入口，
+// 日志记录的是实际生效价，历史成本不随配置修改改写。
 func ApplyPeakMultiplier(inputPrice, cacheReadPrice, outputPrice, multiplier float64) (float64, float64, float64) {
 	if multiplier == 1 {
 		return inputPrice, cacheReadPrice, outputPrice
@@ -371,10 +330,7 @@ func ApplyPeakMultiplier(inputPrice, cacheReadPrice, outputPrice, multiplier flo
 	return inputPrice * multiplier, cacheReadPrice * multiplier, outputPrice * multiplier
 }
 
-// ResolvePricingFor 是热路径入口：为指定上游的条款解析出此刻的生效单价与时段名。
-//
-// terms 为 nil（该关联没配峰谷）或未启用时直接返回原价，不产生额外开销。
-// 日历从全局取——条款按上游，日历是事实。
+// ResolvePricingFor 是热路径入口：terms 为 nil（该关联没配峰谷）或未启用时直接返回原价。
 func ResolvePricingFor(ctx context.Context, at time.Time, terms *models.PeakTerms, inputPrice, cacheReadPrice, outputPrice float64) (float64, float64, float64, string) {
 	if terms == nil || !terms.Enabled {
 		return inputPrice, cacheReadPrice, outputPrice, ""
@@ -384,17 +340,9 @@ func ResolvePricingFor(ctx context.Context, at time.Time, terms *models.PeakTerm
 	return i, c, o, period
 }
 
-// ---------------------------------------------------------------------------
-// 节假日数据同步
-// ---------------------------------------------------------------------------
-
 // SyncHolidays 拉取指定年份节假日并合并进日历的 DateOverrides。
-//
-// fetch 为 nil 时使用 DefaultHolidayFetcher（远端优先、失败回落到内置数据）。
-//
-// 合并语义：同一年份的既有覆盖会被**整体替换**，其他年份的保持不动。
-// 整体替换而非逐条合并，是为了让重复同步幂等——否则已撤销的调休
-// 会以陈旧条目的形式残留下来。
+// fetch 为 nil 时使用 DefaultHolidayFetcher。同年覆盖整体替换、他年保留，
+// 使重复同步幂等——已撤销的调休不会以陈旧条目残留。
 func SyncHolidays(ctx context.Context, year int, fetch HolidayFetcher) (models.PeakCalendar, int, error) {
 	if fetch == nil {
 		fetch = DefaultHolidayFetcher
@@ -410,7 +358,7 @@ func SyncHolidays(ctx context.Context, year int, fetch HolidayFetcher) (models.P
 
 	cfg := GetPeakCalendar(ctx)
 
-	// 先清掉该年份的旧覆盖，再写入新的，实现"按年替换"
+	// 先清掉该年份的旧覆盖，再写入新的
 	prefix := fmt.Sprintf("%04d-", year)
 	merged := make(map[string]string, len(cfg.DateOverrides)+len(overrides))
 	for date, v := range cfg.DateOverrides {

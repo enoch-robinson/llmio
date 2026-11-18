@@ -15,8 +15,6 @@ import (
 	"gorm.io/gorm"
 )
 
-// count_tokens 配置缓存与鉴权 Key / 自愈策略缓存同一套契约：TTL 内读缓存，
-// 绕过失效钩子的写库要等显式失效。缓存是包级状态，用例首尾各失效一次防串味。
 func setupCountTokensDB(t *testing.T) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "count-tokens-handler.db")
@@ -43,7 +41,6 @@ func TestCountTokensConfigCache(t *testing.T) {
 	setupCountTokensDB(t)
 	ctx := context.Background()
 
-	// 配置行不存在：found=false 且不入缓存，创建后应立即可见
 	if _, found, err := loadCountTokensConfig(ctx); found || err != nil {
 		t.Fatalf("缺配置行应 found=false err=nil，实得 found=%v err=%v", found, err)
 	}
@@ -58,7 +55,7 @@ func TestCountTokensConfigCache(t *testing.T) {
 		t.Fatalf("读到错误配置: %+v", cfg)
 	}
 
-	// 绕过 UpdateConfigByKey 的失效钩子直接改库：TTL 内仍命中旧缓存
+	// 绕过失效钩子直接改库：TTL 内仍命中旧缓存
 	if err := models.SaveConfigValue(ctx, models.KeyAnthropicCountTokens, `{"base_url":"https://b.example.com","api_key":"sk-b","version":"2024-01-01"}`); err != nil {
 		t.Fatalf("SaveConfigValue: %v", err)
 	}
@@ -66,7 +63,6 @@ func TestCountTokensConfigCache(t *testing.T) {
 		t.Fatalf("TTL 内应命中旧缓存，实得 %+v", cfg)
 	}
 
-	// 显式失效（或走 UpdateConfigByKey 的钩子）后读库：新值可见
 	InvalidateCountTokensConfig()
 	if cfg, _, _ := loadCountTokensConfig(ctx); cfg.BaseURL != "https://b.example.com" || cfg.APIKey != "sk-b" {
 		t.Fatalf("失效后应读到新配置，实得 %+v", cfg)
@@ -88,7 +84,7 @@ func TestCountTokensConfigParseError(t *testing.T) {
 	if !errors.As(err, &perr) {
 		t.Fatalf("错误应可解包为 parseConfigError，实得 %T", err)
 	}
-	// 坏配置不入缓存：修好后立即可读，不需要等 TTL
+	// 坏配置不入缓存，修好后立即可读
 	if err := models.SaveConfigValue(ctx, models.KeyAnthropicCountTokens, `{"base_url":"https://c.example.com"}`); err != nil {
 		t.Fatalf("SaveConfigValue: %v", err)
 	}

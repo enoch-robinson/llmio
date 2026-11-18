@@ -72,8 +72,7 @@ func GeminiGenerateContentHandler(c *gin.Context) {
 	chatHandler(c, service.NewBeforerGemini(model, stream), service.ProcesserGemini, consts.StyleGemini)
 }
 
-// maxChatBodyBytes 限制聊天请求体大小：请求体会被完整物化且内存随并发线性
-// 放大，不能无界。测试会调小以覆盖超限路径。
+// maxChatBodyBytes 是 var 而非 const：测试会调小以覆盖超限路径。
 var maxChatBodyBytes = int64(32 << 20)
 
 func chatHandler(c *gin.Context, preProcessor service.Beforer, postProcessor service.Processer, style string) {
@@ -143,8 +142,6 @@ func chatHandler(c *gin.Context, preProcessor service.Beforer, postProcessor ser
 	// 异步处理输出并记录 tokens
 	authKeyIOLog, _ := ctx.Value(consts.ContextKeyAuthKeyIOLog).(bool)
 	if !authKeyIOLog {
-		// ioLog 关闭时日志协程用不到原始请求体：提前解除引用，免得大 body
-		// 被 pin 到整条响应流结束。
 		before.ClearRaw()
 	}
 	slog.Info("start recording log", "logId", logId, "authKeyIOLog", authKeyIOLog)

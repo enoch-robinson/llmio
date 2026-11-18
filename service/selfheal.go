@@ -145,10 +145,7 @@ func DefaultSelfHealPolicy() *models.SelfHealPolicy {
 	return &models.SelfHealPolicy{Enabled: true, MaxDrops: SelfHealMaxDrops}
 }
 
-// selfHealCacheTTL 自愈策略缓存有效期。
-//
-// 读侧在每个聊天请求的转发路径上；策略是管理端改一次管很久的数据，
-// 短 TTL + 写后失效（见 handler.UpdateConfigByKey）比每请求查库划算。
+// selfHealCacheTTL 读侧在转发路径上，短 TTL + 写后失效。
 const selfHealCacheTTL = 30 * time.Second
 
 var (
@@ -157,8 +154,7 @@ var (
 	selfHealCachedAt time.Time
 )
 
-// GetSelfHealPolicy 读自愈策略（带短 TTL 缓存）。缺行、空值、坏 JSON 一律
-// 回默认继续服务——一个装饰性配置读坏了不该让请求跟着失败。
+// GetSelfHealPolicy 缺行、空值、坏 JSON 一律回默认继续服务。
 func GetSelfHealPolicy(ctx context.Context) *models.SelfHealPolicy {
 	selfHealMu.RLock()
 	if selfHealCached != nil && time.Since(selfHealCachedAt) < selfHealCacheTTL {
@@ -184,7 +180,6 @@ func GetSelfHealPolicy(ctx context.Context) *models.SelfHealPolicy {
 	return policy
 }
 
-// InvalidateSelfHealPolicy 使自愈策略缓存失效，供配置写入后调用。
 func InvalidateSelfHealPolicy() {
 	selfHealMu.Lock()
 	selfHealCached = nil

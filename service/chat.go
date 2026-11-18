@@ -41,9 +41,7 @@ const (
 )
 
 const (
-	// errorBodyLimit 闸住非 200 错误体的读取上限（进日志与自愈判定）。
-	errorBodyLimit = 1 << 20
-	// errorMatcherSampleLimit 是 ErrorMatcher 只采样的响应前缀长度。
+	errorBodyLimit          = 1 << 20
 	errorMatcherSampleLimit = 64 << 10
 )
 
@@ -235,8 +233,6 @@ func BalanceChat(ctx context.Context, start time.Time, style string, before Befo
 
 	timer := time.NewTimer(time.Second * time.Duration(providersWithMeta.TimeOut))
 	defer timer.Stop()
-	// 自愈策略每请求读一次：同一次请求的各次重试共用同一策略，没必要每个
-	// attempt 都查一遍库。
 	selfHeal := GetSelfHealPolicy(ctx)
 	for retry := range providersWithMeta.MaxRetry {
 		select {
@@ -426,8 +422,7 @@ func BalanceChat(ctx context.Context, start time.Time, style string, before Befo
 					break
 				}
 
-				// 非 200 错误体闸在 1MB：错误体只进日志与自愈判定，没有消费场景需要全量；
-				// 上游病态返回（GB 级 HTML 错误页）不应打爆内存与落库日志。
+				// 错误体只进日志与自愈判定，闸在 1MB 防病态上游打爆内存与日志
 				byteBody, rerr := io.ReadAll(io.LimitReader(res.Body, errorBodyLimit))
 				res.Body.Close()
 				// 非 200 的每一次尝试到此终结——自愈重发或换下一家都会新开 attempt,
@@ -489,8 +484,7 @@ func BalanceChat(ctx context.Context, start time.Time, style string, before Befo
 				contentType := strings.ToLower(res.Header.Get("Content-Type"))
 				// 流式正常返回通常是 text/event-stream，不提前消费响应体避免影响转发。
 				if !strings.Contains(contentType, "text/event-stream") {
-					// 只采样前 64KB 判定：错误样本（quota exceeded 等）总在响应开头，
-					// 全量读入会把大响应整体拉进内存再复制一份字符串。
+					// 只采样前 64KB：错误样本总在响应开头，全量读入徒增内存与复制
 					head, rerr := io.ReadAll(io.LimitReader(res.Body, errorMatcherSampleLimit))
 					if rerr != nil {
 						fail(fmt.Errorf("read body failed: %w", rerr))
@@ -508,8 +502,7 @@ func BalanceChat(ctx context.Context, start time.Time, style string, before Befo
 						continue
 					}
 
-					// 未命中：已读前缀与剩余流拼回无损转发；Close 转发给原 body，
-					// 否则读过的连接既不复用也不释放（旧实现丢在这里的 NopCloser 正是这个坑）
+					// 拼回无损转发；Close 必须转发给原 body，否则连接不复用也不释放
 					res.Body = readCloser{
 						Reader: io.MultiReader(bytes.NewReader(head), res.Body),
 						Closer: res.Body,

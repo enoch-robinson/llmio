@@ -9,13 +9,10 @@ import (
 	"github.com/atopos31/llmio/models"
 )
 
-// benchmarkRows 与真机 30 天窗口同一量级（实测约 9 万行，这里取 ~5 万折中，
-// 让单次聚合保持在几十毫秒内，同时足以暴露排行榜全量切片的常驻开销）。
+// benchmarkRows 与真机 30 天窗口同一量级（实测约 9 万行，取 ~5 万折中）。
 const benchmarkRows = 50_000
 
-// buildBenchLogs 用测试里现成的 logAt 构造一批覆盖聚合全分支的合成日志：
-// 成功/错误/在途混合、多供应商多模型多 Key 多 UA、分数含大并列组
-// （TPS 榜首约 500 行同分，正好压中并列淘汰路径）、含价格与缓存命中。
+// buildBenchLogs 构造覆盖聚合全分支的合成日志（状态混合、多维度基数、大并列组）。
 func buildBenchLogs(n int) []models.ChatLog {
 	base := time.Date(2026, 9, 29, 10, 0, 0, 0, time.UTC)
 	logs := make([]models.ChatLog, 0, n)
@@ -32,7 +29,7 @@ func buildBenchLogs(n int) []models.ChatLog {
 		l.ProviderModel = fmt.Sprintf("model-%d", i%25)
 		l.Name = fmt.Sprintf("alias-%d", i%10)
 		l.UserAgent = fmt.Sprintf("ua-%d", i%4)
-		l.AuthKeyID = uint(i % 8) // 含 0：覆盖 admin 标签
+		l.AuthKeyID = uint(i % 8) // 含 0 覆盖 admin 标签
 		l.Error = "status: 500, body: upstream exploded"
 		l.Retry = i % 3
 		l.ProxyTime = time.Duration(i%900) * time.Millisecond
@@ -51,8 +48,7 @@ func buildBenchLogs(n int) []models.ChatLog {
 	return logs
 }
 
-// BenchmarkGroupP95 量化分组 P95 采样化的收益：50k 条成功样本挤进同一个分组
-// （最坏基数），跑 add + result 全流程。
+// BenchmarkGroupP95 50k 条成功样本挤进同一分组（最坏基数）。
 func BenchmarkGroupP95(b *testing.B) {
 	const n = 50_000
 	base := time.Date(2026, 9, 29, 10, 0, 0, 0, time.UTC)
@@ -73,9 +69,7 @@ func BenchmarkGroupP95(b *testing.B) {
 	}
 }
 
-// BenchmarkAggregateWithBucket 是排行榜有界化（O(K) 堆淘汰）前后的内存对照基准：
-// 旧实现把每条成功行 append 进两份完整 LogRow 切片、错误行再进一份，
-// 收尾时全量 SliceStable 排序后只取前 10 条，常驻与窗口行数成正比。
+// BenchmarkAggregateWithBucket 排行榜有界化前后的内存对照基准。
 func BenchmarkAggregateWithBucket(b *testing.B) {
 	logs := buildBenchLogs(benchmarkRows)
 	bucket := time.Hour

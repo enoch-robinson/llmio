@@ -9,10 +9,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// TestChatLogIndexes 固化分析聚合所依赖的索引。
-//
-// 这些索引若被误删或改列，查询不会报错、只会静默退化为全表扫描，
-// 很难在日常使用中发现——所以用测试守住，而不是靠注释提醒。
+// TestChatLogIndexes 固化分析聚合所依赖的索引：误删/改列只会静默退化，测试守住。
 func TestChatLogIndexes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "idx.db")
 	db, err := gorm.Open(sqlite.Open(path), &gorm.Config{})
@@ -49,8 +46,7 @@ func TestChatLogIndexes(t *testing.T) {
 		}
 	}
 
-	// name / status / auth_key_id 不再建单列索引：它们是三个复合索引的最左前缀，
-	// 单列等值查询走前缀完全等价，多建一条只是双倍的写入期维护成本。
+	// name / status / auth_key_id 不再建单列索引：复合前缀已完全覆盖
 	for _, name := range []string{
 		"idx_chat_logs_name",
 		"idx_chat_logs_status",
@@ -101,9 +97,7 @@ func indexColumns(t *testing.T, db *gorm.DB, index string) []string {
 	return cols
 }
 
-// configs.key 的点查在热路径上：自愈策略在每个聊天请求的转发循环里读，
-// 调度器按周期读压缩/回收策略，启动期各处 ensure* 与回填门槛也都按它查。
-// 没索引时全是 configs 全表扫，且退化不报错、只变慢，所以用测试钉住。
+// configs.key 点查在热路径上，退化不报错只变慢，用测试钉住
 func TestConfigKeyIndex(t *testing.T) {
 	initModelAt(t, filepath.Join(t.TempDir(), "config-idx.db"))
 

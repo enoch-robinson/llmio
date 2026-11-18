@@ -14,11 +14,7 @@ import (
 
 var singleFlightGroup singleflight.Group
 
-// authKeyCacheTTL 鉴权 Key 缓存有效期。
-//
-// GetAuthKey 跑在每个 API 请求的鉴权中间件里；Key 及其权限是管理端改一次管
-// 很久的数据，短 TTL + 写后失效（handler 的 auth-keys 增删改）比每请求查库
-// 划算。绕过 API 直接改库的变更最迟一个 TTL 后生效。
+// authKeyCacheTTL 绕过 API 直接改库的变更最迟一个 TTL 后生效。
 const authKeyCacheTTL = 15 * time.Second
 
 var (

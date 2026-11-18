@@ -67,18 +67,12 @@ type ModelWithProvider struct {
 	Peak *PeakTerms `gorm:"serializer:json"`
 }
 
-// ChatLog 请求日志，也是分析聚合的事实表。
+// ChatLog 请求日志，分析聚合的事实表。
 //
-// 此处刻意不内嵌 gorm.Model：分析聚合全部按 created_at 过滤与分桶，
-// 需要 created_at 参与复合索引，而内嵌结构的字段无法单独打标签。
-// 字段集合与 gorm.Model 等价（ID / CreatedAt / UpdatedAt / DeletedAt），
-// 因此对外仍以 ID、CreatedAt、DeletedAt 访问，JSON 形态不变。
-//
-// 索引按聚合的实际查询形态设计：
-//   - created_at 单列：范围过滤 + ORDER BY（三个复合索引里它是第二列，单列标签必须留住）
-//   - status, created_at：趋势与成功率
-//   - auth_key_id, created_at：按 Key 下钻
-//   - name, created_at：按模型下钻
+// 刻意不内嵌 gorm.Model：created_at 需要参与复合索引，内嵌结构的字段无法单独
+// 打标签；字段集合与 gorm.Model 等价，对外访问与 JSON 形态不变。
+// 索引按聚合的实际查询形态设计：created_at（范围/排序，标签必须留住）、
+// (status, created_at)、(auth_key_id, created_at)、(name, created_at)。
 type ChatLog struct {
 	ID        uint      `gorm:"primarykey"`
 	CreatedAt time.Time `gorm:"index;index:idx_chat_logs_status_created,priority:2;index:idx_chat_logs_key_created,priority:2;index:idx_chat_logs_name_created,priority:2"`
@@ -90,10 +84,8 @@ type ChatLog struct {
 	// 存量库上的旧索引由 DropChatLogsDeletedAtIndex 在启动时摘掉。
 	DeletedAt gorm.DeletedAt
 
-	// Name / Status / AuthKeyID 不再带单列 index 标签：它们分别是下面三个复合
-	// 索引的最左前缀，`WHERE name = ?` 这类单列等值查询复合索引完全覆盖
-	// （还能顺带吃到 created_at 的顺序）。存量库上的旧单列索引由
-	// DropChatLogsPrefixRedundantIndexes 在启动时摘掉。
+	// Name / Status / AuthKeyID 不再带单列 index 标签：复合索引的最左前缀已覆盖
+	// 单列等值查询，存量库旧索引由 DropChatLogsPrefixRedundantIndexes 启动时摘掉。
 	Name          string `gorm:"index:idx_chat_logs_name_created,priority:1"`
 	TraceID       string `gorm:"index"`
 	ProviderModel string `gorm:"index"`

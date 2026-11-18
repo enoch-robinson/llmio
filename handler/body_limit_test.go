@@ -12,8 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// 聊天入口的请求体上限是内存闸门：请求体会被完整物化，内存随并发线性放大。
-// 超限时直接 413，不再往下走。不触库，无需初始化数据库。
+// 超限直接 413；不触库，无需初始化数据库。
 func TestChatHandlerRejectsOversizedBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
@@ -53,9 +52,8 @@ func TestEventLoggingLimits(t *testing.T) {
 		}
 	})
 
-	// 未鉴权端点 + 无上限解码是外部可直接触发的内存放大点，body 闸门必须生效。
-	// body 必须是合法 JSON：解码器要完整吃掉它才撞得上字节闸门，非法 JSON
-	// 会先吃到 SyntaxError 走 BadRequest 分支。
+	// 未鉴权端点 + 无上限解码是外部可直接触发的内存放大点
+	// body 必须是合法 JSON：非法 JSON 会先吃到 SyntaxError 走 BadRequest，撞不上字节闸门
 	t.Run("超大 body 返回 413", func(t *testing.T) {
 		pad := bytes.Repeat([]byte("a"), maxEventLoggingBodyBytes+4096)
 		body := append(append([]byte(`{"pad":"`), pad...), '"', '}')

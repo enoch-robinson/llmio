@@ -85,8 +85,7 @@ func doChatRequest(t *testing.T) *httptest.ResponseRecorder {
 	return w
 }
 
-// 样本落在 64KB 采样窗内的大响应（200KB）必须仍被 ErrorMatcher 识别为错误，
-// 且落库 error 携带样本与截断后的 body。
+// 样本在 64KB 采样窗内：200KB 响应仍被识别为错误。
 func TestErrorMatcherMatchesSampleInPrefixOfLargeBody(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -116,16 +115,14 @@ func TestErrorMatcherMatchesSampleInPrefixOfLargeBody(t *testing.T) {
 	}
 }
 
-// 样本只在 64KB 采样窗之外出现时不应命中（只采样前缀的全部意义），
-// 且响应体要逐字节无损转发到客户端——这同时钉住 MultiReader 拼接
-// 与原 body Close 链两条回归线。
+// 样本在 64KB 窗外不命中，且响应体逐字节无损转发（钉住 MultiReader 拼接与原 body Close 链）。
 func TestErrorMatcherIgnoresSampleBeyondPrefixAndForwardsBodyIntact(t *testing.T) {
 	const (
 		padBefore = 70_000
 		padAfter  = 10_000
 	)
 	upstreamBody := strings.Replace(largeCompletionBody(padBefore+padAfter),
-		// content 由连续 x 组成，把样本塞进 70KB 之后：完整读才会命中，采样读不会
+		// 样本塞在 70KB 后：完整读才会命中，采样读不会
 		strings.Repeat("x", padBefore), strings.Repeat("x", padBefore-1)+"quota exceeded", 1)
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -144,16 +141,14 @@ func TestErrorMatcherIgnoresSampleBeyondPrefixAndForwardsBodyIntact(t *testing.T
 	if !bytes.Equal(w.Body.Bytes(), []byte(upstreamBody)) {
 		t.Fatalf("转发体与上游体不一致：got %d bytes, want %d bytes", w.Body.Len(), len(upstreamBody))
 	}
-	// RecordLog 是后台协程且用包级 DB：等它落库完成再让 Cleanup 换回 DB，
-	// 否则收尾时 panic
+	// RecordLog 是后台协程且用包级 DB，先等落库完成再让 Cleanup 换回 DB，否则收尾 panic
 	waitFor(t, "success 日志落库", func() bool {
 		n, err := gorm.G[models.ChatLog](models.DB).Where("status = ?", consts.StatusSuccess).Count(context.Background(), "id")
 		return err == nil && n > 0
 	})
 }
 
-// 非 200 错误体闸在 1MB：上游返回 5MB 错误页时，落库 error 里的 body 部分
-// 不应超过闸门（旧实现会把 5MB 全量塞进日志）。
+// 非 200 错误体闸在 1MB，落库 error 不应超过闸门。
 func TestNon200ErrorBodyCappedAtLimit(t *testing.T) {
 	const hugeBodyLen = 5 << 20
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -180,7 +175,7 @@ func TestNon200ErrorBodyCappedAtLimit(t *testing.T) {
 	if !strings.HasPrefix(log.Error, "status: 429, body: ") {
 		t.Fatalf("落库 error 应以状态与 body 前缀开头，实得前 40 字节: %.40q", log.Error)
 	}
-	// service.errorBodyLimit（1MB）加余量给错误链包装；用字面量避免为测试导出常量
+	// 1MB（service.errorBodyLimit）加错误链包装余量
 	if len(log.Error) > 1<<20+512 {
 		t.Fatalf("落库 error 应被闸在 1MB 内，实得 %d 字节", len(log.Error))
 	}

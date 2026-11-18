@@ -90,11 +90,8 @@ func Init(ctx context.Context, path string) {
 	if _, err := gorm.G[AuthKey](DB).Where("io_log IS NULL").Update(ctx, "io_log", false); err != nil {
 		panic(err)
 	}
-	// chat_logs 的两条兼容回填（下面）只对"加列前的存量行"有意义，做一次就
-	// 够了。以前每次启动都无条件全表扫两遍；chat_logs 是最大的表，升级完成后
-	// 这两条 UPDATE 永远命中 0 行，却照样付两遍扫描的钱。落一个完成标记：
-	// 标记在就整段跳过；标记只在两条 UPDATE 都成功后才写——panic-on-error，
-	// 失败的进程重启后会再试一遍，不会留下"半回填 + 有标记"的库。
+	// chat_logs 兼容回填只对加列前的存量行有意义：落完成标记，标记在则跳过，
+	// 标记只在两条 UPDATE 都成功后才写（panic-on-error，不留“半回填+有标记”）。
 	done, err := chatLogsBackfillDone(ctx)
 	if err != nil {
 		panic(err)
@@ -103,8 +100,7 @@ func Init(ctx context.Context, path string) {
 		if _, err := gorm.G[ChatLog](DB).Where("auth_key_id IS NULL").Update(ctx, "auth_key_id", 0); err != nil {
 			panic(err)
 		}
-		// 备用标记是后加的非指针 bool：AutoMigrate 加列不会给存量行填默认值，
-		// 留 NULL 会导致日志列表扫描 bool 时报错（与 auth_key_id 同一类问题）
+		// AutoMigrate 加列不填存量行默认值，留 NULL 会让 bool 扫描报错
 		if _, err := gorm.G[ChatLog](DB).Where("backup IS NULL").Update(ctx, "backup", false); err != nil {
 			panic(err)
 		}
@@ -134,28 +130,19 @@ func Init(ctx context.Context, path string) {
 	if _, err := gorm.G[ModelWithProvider](DB).Where("currency = '' OR currency IS NULL").Update(ctx, "currency", "CNY"); err != nil {
 		panic(err)
 	}
-	// 放在 Init 的最后一步：它要建索引，真机上是一次秒级的全表读。
-	// **失败只记日志**——一条索引没建上只是慢，不该让服务起不来。
+	// 三个索引操作都失败只记日志：建不上/摘不掉只是慢，不该让服务起不来
 	if err := EnsureChatIOLogIDIndex(ctx); err != nil {
 		slog.Error("chat_ios.log_id 索引没建上（回填响应体将退化为全表扫描）", "error", err)
 	}
-	// 与上面相反：这一步是**删**索引。chat_logs.deleted_at 恒为 NULL，那条索引
-	// 让分析页的时间窗查询退化成全表扫（详见 DropChatLogsDeletedAtIndex）。
-	// 同样失败只记日志：摘不掉只是慢，不该让服务起不来。
+	// 删 chat_logs.deleted_at 索引的理由见 DropChatLogsDeletedAtIndex
 	if err := DropChatLogsDeletedAtIndex(ctx); err != nil {
 		slog.Error("chat_logs.deleted_at 索引没摘掉（分析页取数会退化为全表扫描）", "error", err)
 	}
-	// 同一个调用点：顺路摘掉三个前缀冗余的单列索引（复合索引已覆盖它们，
-	// 留着只是每次写入多付三份索引维护成本）。同样失败只记日志。
 	if err := DropChatLogsPrefixRedundantIndexes(ctx); err != nil {
 		slog.Error("chat_logs 前缀冗余单列索引没摘掉（写入期多付索引维护成本）", "error", err)
 	}
-
-	// `DB_VACUUM` 的启动期 VACUUM **搬去 service.PrepareStorage 了**（main 里、
-	// 监听端口之前调用）。搬家的理由是它原先 `panic(err)`，而且连磁盘够不够都
-	// 没看过：VACUUM 要一份和库等大的副本，在 7 GiB 的库上磁盘不够就是启动失败。
-	// 现在它与 auto_vacuum 转换合并成一次动作、动手前预检、失败只跳过。
-	// 顺带解掉一个分层问题：`diskFree` 在 service 包里，models 不能反向依赖它。
+	// 启动期 VACUUM 已搬去 service.PrepareStorage（磁盘预检 + 与 auto_vacuum
+	// 转换合并，models 不能反向依赖 diskFree）。
 }
 
 // chatIOLogIDIndexName / chatIOLogIDIndexSQL 是 chat_ios.log_id 的索引名与建法。
@@ -323,7 +310,6 @@ func ensureModelDisplayOrder(ctx context.Context) error {
 	})
 }
 
-// chatLogsBackfillDone 读 chat_logs 兼容回填的完成标记。标记行在即视为已回填。
 func chatLogsBackfillDone(ctx context.Context) (bool, error) {
 	count, err := gorm.G[Config](DB).Where("key = ?", KeyChatLogsBackfillState).Count(ctx, "*")
 	if err != nil {

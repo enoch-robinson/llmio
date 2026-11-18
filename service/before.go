@@ -20,8 +20,7 @@ type Before struct {
 
 type Beforer func(data []byte) (*Before, error)
 
-// ClearRaw 释放对原始请求体的引用。ioLog 关闭时 RecordLog 用不到 raw，
-// 提前解除引用，大请求体不必被日志协程持有到整条响应流结束。
+// ClearRaw 提前解除对原始请求体的引用，免得大 body 被日志协程持有到响应流结束。
 func (b *Before) ClearRaw() {
 	b.raw = nil
 }

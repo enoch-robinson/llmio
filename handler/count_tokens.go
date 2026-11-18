@@ -17,9 +17,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// countTokensConfigTTL 是 count_tokens 配置的缓存有效期。Claude Code 每次请求
-// 前都会先打一发 count_tokens，配置本身是管理端天级改一次的数据，短 TTL +
-// 写后失效（UpdateConfigByKey）比每请求查库划算。
+// countTokensConfigTTL 30s：配置天级改一次，写后失效（UpdateConfigByKey）。
 const countTokensConfigTTL = 30 * time.Second
 
 var (
@@ -29,15 +27,13 @@ var (
 	countTokensReady bool
 )
 
-// parseConfigError 区分「配置存在但解析坏了」与「查询失败」：两者都回 500，
-// 但操作员看到的提示不同。
 type parseConfigError struct{ err error }
 
 func (e *parseConfigError) Error() string { return e.err.Error() }
 func (e *parseConfigError) Unwrap() error { return e.err }
 
-// loadCountTokensConfig 读 count_tokens 配置（带短 TTL 缓存）。found=false 表示
-// 配置行不存在，调用方按 NotFound 响应；不存在的配置不入缓存，创建后立即可见。
+// loadCountTokensConfig found=false 表示配置行不存在，调用方按 NotFound 响应；
+// 缺行不入缓存，创建后立即可见。
 func loadCountTokensConfig(ctx context.Context) (models.AnthropicCountTokens, bool, error) {
 	countTokensMu.RLock()
 	if countTokensReady && time.Since(countTokensAt) < countTokensConfigTTL {
@@ -67,7 +63,6 @@ func loadCountTokensConfig(ctx context.Context) (models.AnthropicCountTokens, bo
 	return cfg, true, nil
 }
 
-// InvalidateCountTokensConfig 使 count_tokens 配置缓存失效，供配置写入后调用。
 func InvalidateCountTokensConfig() {
 	countTokensMu.Lock()
 	countTokensCfg = models.AnthropicCountTokens{}
@@ -76,8 +71,6 @@ func InvalidateCountTokensConfig() {
 	countTokensMu.Unlock()
 }
 
-// countTokensHTTPClient 带 30s 整体超时：响应是小 JSON，上游挂起时不能让请求
-// 与连接无限滞留（http.DefaultClient 没有任何超时）。
 var countTokensHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 func CountTokens(c *gin.Context) {

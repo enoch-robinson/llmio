@@ -20,8 +20,8 @@ const (
 	MaxScannerBufferSize  = 1024 * 1024 * 64 // 64MB
 )
 
-// Processer 从响应流解析日志行与 token 用量。keepOutput 为 false 时（ioLog
-// 关闭，解析产物不会被持久化）跳过整份响应体的累积，只保留统计所需的部分。
+// Processer 从响应流解析日志行与 token 用量；keepOutput=false（ioLog 关闭）时
+// 跳过响应体累积，只保留统计所需的部分。
 type Processer func(ctx context.Context, pr io.Reader, stream bool, start time.Time, keepOutput bool) (*models.ChatLog, *models.OutputUnion, error)
 
 func ProcesserOpenAI(ctx context.Context, pr io.Reader, stream bool, start time.Time, keepOutput bool) (*models.ChatLog, *models.OutputUnion, error) {

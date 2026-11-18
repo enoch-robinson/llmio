@@ -1338,21 +1338,16 @@ func TestAggregateLatency(t *testing.T) {
 	if diff := res.Latency.Proxy.Avg - 5500; diff > 1e-9 || diff < -1e-9 {
 		t.Fatalf("代理耗时均值应为 5500ms，实得 %v", res.Latency.Proxy.Avg)
 	}
-	// tps/proxy 的全量样本列表已从契约移除，只回分位数
+	// tps/proxy 不应有直方图
 	if res.Latency.Tps.Histogram != nil || res.Latency.Proxy.Histogram != nil {
 		t.Fatal("tps/proxy 不应携带直方图")
 	}
 }
 
-// TestAggregateFirstChunkHistogram 钉住服务端分箱的分桶语义：左闭右开、末桶
-// 兜底 ≥ 末边界，counts 之和等于 total；边界与 webui FirstChunkHistogram 原有
-// 前端分桶一致。
 func TestAggregateFirstChunkHistogram(t *testing.T) {
 	t.Parallel()
 
 	base := time.Date(2026, 9, 29, 10, 0, 0, 0, time.UTC)
-	// fc 值覆盖：桶下界（0s→桶0）、桶上界恰好落在下一桶（0.5s→桶1）、中间值
-	//（1.5s→桶2）、末边界（60s→末桶）、超末边界（120s→末桶）
 	fcs := []time.Duration{0, 500 * time.Millisecond, 1500 * time.Millisecond, time.Second * 60, time.Second * 120}
 	wantIdx := []int{0, 1, 2, len(firstChunkHistogramEdges) - 1, len(firstChunkHistogramEdges) - 1}
 
@@ -1362,7 +1357,6 @@ func TestAggregateFirstChunkHistogram(t *testing.T) {
 		l.FirstChunkTime = fc
 		logs = append(logs, l)
 	}
-	// 失败/在途不进直方图
 	for i := 0; i < 2; i++ {
 		l := logAt(uint(len(fcs)+i+1), base, consts.StatusError)
 		l.FirstChunkTime = 999 * time.Millisecond
@@ -1396,10 +1390,7 @@ func TestAggregateFirstChunkHistogram(t *testing.T) {
 	}
 }
 
-// TestAggregateGroupP95Reservoir 钉住分组 P95 的采样契约：
-//   - 样本数 ≤ K：与全量最近秩计算逐位一致；
-//   - 样本数 > K：采样池截到 K，P95 与全量真值的偏差在平滑分布下有界；
-//   - 固定播种：同一份输入两次聚合结果完全一致。
+// TestAggregateGroupP95Reservoir 钉住采样契约：≤K 逐位一致、>K 截到池且有界偏差、固定播种可复现。
 func TestAggregateGroupP95Reservoir(t *testing.T) {
 	t.Parallel()
 
@@ -1415,7 +1406,7 @@ func TestAggregateGroupP95Reservoir(t *testing.T) {
 
 		logs := make([]models.ChatLog, 0, 100)
 		for i := 1; i <= 100; i++ {
-			logs = append(logs, mk(uint(i), i)) // 1..100ms
+			logs = append(logs, mk(uint(i), i))
 		}
 		res := AggregateWithBucket(logs, StatsFilter{}, time.Hour)
 		// 最近秩：idx = floor(99*0.95) = 94 → 95ms
@@ -1431,7 +1422,7 @@ func TestAggregateGroupP95Reservoir(t *testing.T) {
 		samples := make([]float64, 0, n)
 		logs := make([]models.ChatLog, 0, n)
 		for i := 0; i < n; i++ {
-			fc := float64(i%3000) + 1 // 1..3000ms 循环
+			fc := float64(i%3000) + 1
 			samples = append(samples, fc)
 			logs = append(logs, mk(uint(i+1), int(fc)))
 		}
@@ -1541,9 +1532,8 @@ func TestAggregateLeaderboardLimit(t *testing.T) {
 	}
 }
 
-// TestAggregateLeaderboardTieOrder 锁住排行榜的并列次序契约：分数并列时
-// 按原始行序（先到者在前）排序与保留。这是原实现 SliceStable 全量排序的
-// 行为承诺，改成有界堆淘汰后仍须逐行一致。
+// TestAggregateLeaderboardTieOrder 分数并列时按原始行序排序与保留，
+// 与原实现 SliceStable 全量排序逐行一致。
 func TestAggregateLeaderboardTieOrder(t *testing.T) {
 	t.Parallel()
 

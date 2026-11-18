@@ -16,34 +16,19 @@ import (
 	"gorm.io/gorm"
 )
 
-// 本文件验证**从上游旧库升级到本分支**的路径。
-//
-// 为什么必须单独测：本分支对 ChatLog 做了三处结构性改动——
-//  1. 展开内嵌的 gorm.Model（改为显式 ID/CreatedAt/UpdatedAt/DeletedAt）
-//  2. 新增 peak_period 列
-//  3. 新增 4 个索引（含 3 个复合）
-//
-// 新库上 AutoMigrate 总能建对，所以"新库能跑"证明不了升级路径可用。真实风险是：
-// AutoMigrate 在已有表上做表重建、丢数据，索引没建上，或者兼容回填把用户自己填过的
-// 值覆盖掉。因此这里搭一个**上游形态**的旧库跑一遍 Init，再逐项断言。
-//
-// 旧库的结构抄自 testdata/upstream_schema.sql（由上游代码自己建库后导出，不是手写）。
-// 比上游更老的、缺列的库由 init_test.go 覆盖：AutoMigrate 补出来的列是 NULL，
-// 必须由这里一并验的兼容回填收拾。
+// 本文件验证从上游旧库升级到本分支的路径。新库上 AutoMigrate 总能建对，
+// 证明不了升级可用；真实风险是表重建丢数据、索引没建上、回填覆盖用户值。
+// 这里搭一个上游形态的旧库（结构抄自 testdata/upstream_schema.sql，上游建库导出）
+// 跑一遍 Init，再逐项断言；比上游更老、缺列的库由 init_test.go 覆盖。
 
-// legacyCreated 是塞进旧库的那批数据的时间戳。
-//
-// 用 time.Time 直接当参数写入，让驱动自己序列化——这样写进去的形态与上游实际写入的
-// 完全一致（驱动写出来是 `2026-01-02 03:04:05.123456` 这种无时区的 UTC 形态）。
+// legacyCreated 用 time.Time 直接写入，让驱动自己序列化，与上游实际写入形态一致。
 var legacyCreated = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
 // upstreamSchemaPath 上游建库语句，文件头有它的来历与重导方法。
 const upstreamSchemaPath = "testdata/upstream_schema.sql"
 
-// openLegacyDB 建一个上游形态的库，并塞入一批旧数据。
-//
-// 结构来自 testdata/upstream_schema.sql 而不是本地手写：手写只能证明"按我以为的旧
-// 结构能升级"，抄下来的才能证明"按上游实际建出来的旧结构能升级"。
+// openLegacyDB 建一个上游形态的库并塞入旧数据；结构抄自 testdata/upstream_schema.sql，
+// 手写的只能证明"按我以为的旧结构能升级"。
 func openLegacyDB(t *testing.T, path string) {
 	t.Helper()
 
@@ -85,14 +70,9 @@ func splitStatements(content string) []string {
 	return out
 }
 
-// seedLegacyRows 往旧库里塞数据。
-//
-// 数据是按"升级时最容易被弄坏的地方"挑的，不是随便填的：
-//   - 每张表都有行，才能发现 AutoMigrate 把某张表重建坏了
-//   - models / model_with_providers / auth_keys / chat_logs 各留一行**空值**，
-//     用来验兼容回填确实补上了
-//   - 同一张表另有一行**用户填过的值**，用来验兼容回填没有越界覆盖
-//   - chat_logs 留一行软删的，用来验它既没被硬删也没被复活
+// seedLegacyRows 的数据按“升级时最容易被弄坏的地方”挑：每表有行（防表重建）、
+// 各留一行空值（验回填补上）、另有一行用户填过的值（验回填不越界）、
+// chat_logs 留一行软删的（验不被硬删也不被复活）。
 func seedLegacyRows(t *testing.T, db *gorm.DB) {
 	t.Helper()
 
@@ -164,8 +144,7 @@ func seedLegacyRows(t *testing.T, db *gorm.DB) {
 		1, legacyCreated, legacyCreated, 1, `{"model":"gpt-4o"}`, `{"id":"chatcmpl-1"}`, "",
 		2, legacyCreated, legacyCreated, 2, `{"model":"claude-3"}`, "", `[]`)
 
-	// 上游的 Init 自己就会塞一条日志清理策略，因此旧库里本来就有它。
-	// 这里给的是**用户改过**的值（默认是关闭、30 天），用来验升级不会把它按回默认。
+	// 用户改过的清理策略（默认关闭、30 天），验升级不会按回默认
 	policy, err := json.Marshal(LogCleanupPolicy{Enabled: true, RetentionDays: 7})
 	if err != nil {
 		t.Fatalf("序列化清理策略失败：%v", err)

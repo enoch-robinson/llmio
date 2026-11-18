@@ -443,9 +443,8 @@ type CountItem struct {
 	Count int64  `json:"count"`
 }
 
-// Histogram 是预分箱的样本分布：counts[i] 统计落在 [edges[i], edges[i+1]) 的
-// 样本，末桶兜底所有 ≥ 末边界的样本；total 为样本总数。边界随响应下发，
-// 前端不再自持常量，避免两端漂移。
+// Histogram 是预分箱的样本分布：counts[i] 统计落在 [edges[i], edges[i+1]) 的样本，
+// 末桶兑底 ≥ 末边界；边界随响应下发，前端不再自持常量。
 type Histogram struct {
 	Edges  []float64 `json:"edges"`
 	Counts []int64   `json:"counts"`
@@ -460,8 +459,7 @@ type LatencyStat struct {
 	P99 float64 `json:"p99"`
 	Avg float64 `json:"avg"`
 	Max float64 `json:"max"`
-	// Histogram 只在 firstChunk 上填充：前端画分布图用；tps/proxy 只需要
-	// 分位数，不再下发全量样本（响应体随窗口行数线性膨胀，之前可到 MB 级）。
+	// 只在 firstChunk 上填充；tps/proxy 只需要分位数
 	Histogram *Histogram `json:"histogram,omitempty"`
 }
 
@@ -648,7 +646,6 @@ func aggregateWithBucketIter(f StatsFilter, bucket time.Duration, next statsLogI
 		res.KPI.TotalTokens += l.TotalTokens
 		res.KPI.CachedTokens += l.PromptTokensDetails.CachedTokens
 		res.KPI.TotalRetries += int64(l.Retry)
-		// 每行只算一次：KPI、时间序列与分组共用同一结果。
 		cost := Cost(l)
 		res.KPI.Cost += cost
 		// 币种取首条非空值：单价是快照，同一批数据通常同一币种。
@@ -853,21 +850,15 @@ func aggregateWithBucketIter(f StatsFilter, bucket time.Duration, next statsLogI
 	return res
 }
 
-// ---------------------------------------------------------------------------
-// 有界排行榜
-// ---------------------------------------------------------------------------
-
-// leaderEntry 是有界排行榜里的一个候选行。seq 记录行的原始顺序（0 起的
-// 到达序号），分数并列时用它保持与全量 SliceStable 稳定排序一致的
-// "先到者在前" 次序。
+// leaderEntry 记录行的原始到达序号 seq，分数并列时保持与全量稳定排序一致的
+// “先到者在前”次序。
 type leaderEntry struct {
 	row   LogRow
 	score float64
 	seq   int
 }
 
-// leaderWorse 判断 a 是否比 b 更差（更该被淘汰）：分数低者差；并列分时
-// 后到者差——与原先对全量切片做稳定排序的并列语义一致。
+// leaderWorse 分数低者差；并列分时后到者差（与全量稳定排序的并列语义一致）。
 func leaderWorse(a, b leaderEntry) bool {
 	if a.score != b.score {
 		return a.score < b.score
@@ -875,7 +866,6 @@ func leaderWorse(a, b leaderEntry) bool {
 	return a.seq > b.seq
 }
 
-// leaderHeap 是按 leaderWorse 组织的最小堆：堆顶永远是当前最差的一条。
 type leaderHeap []leaderEntry
 
 func (h leaderHeap) Len() int           { return len(h) }
@@ -890,18 +880,10 @@ func (h *leaderHeap) Pop() any {
 	return x
 }
 
-// leaderTopK 是容量为 limit 的有界排行榜：逐行喂入 add，result 直接给出与
-// "全量收集 + SliceStable 降序 + 取前 limit 条" 完全相同的行与次序。
-//
-// 之前每条成功行都被 append 进两份完整 LogRow 切片（错误行再进一份），
-// 收尾时全量排序后只取前 10 条——常驻内存与窗口行数成正比，90k 行窗口
-// 实测约 35MB。改为滚动淘汰后常驻只剩堆内的 K 条。
-//
-// 三个榜（TPS / 首包耗时 / 最近错误）共用它，只差分数：最近错误榜的分数是
-// CreatedAt。之所以不用普通覆写 ring buffer：生产流按 created_at DESC 供给，
-// 最新行先到，覆写式 ring buffer 留下的会是窗口里**最旧**的 10 条错误，
-// "最近错误" 语义整个反转；按 CreatedAt 淘汰的有界堆对任意输入顺序都与
-// 原契约逐行一致。
+// leaderTopK 是容量为 limit 的有界排行榜，result 与「全量收集 + SliceStable 降序 +
+// 取前 limit 条」逐行一致。三个榜共用，最近错误榜的分数是 CreatedAt——不能用
+// 覆写 ring buffer：生产流按 created_at DESC 供给，覆写留下的会是最旧的 10 条，
+// “最近”语义整个反转。
 type leaderTopK struct {
 	heap  leaderHeap
 	limit int
@@ -910,8 +892,7 @@ type leaderTopK struct {
 
 func newLeaderTopK(limit int) leaderTopK { return leaderTopK{limit: limit} }
 
-// add 喂入一行。堆满且新行比堆顶更好时淘汰堆顶；并列分的新行永远输给
-// 已在堆内的行（seq 更大），先到者得以保留。
+// add 堆满且新行比堆顶更好时淘汰堆顶；并列分的新行永远输给先到者。
 func (k *leaderTopK) add(row LogRow, score float64) {
 	if k.limit <= 0 {
 		return
@@ -928,8 +909,7 @@ func (k *leaderTopK) add(row LogRow, score float64) {
 	}
 }
 
-// result 输出前 limit 条：分数降序，并列分按原始行序（seq 升序）。每个榜
-// 只在聚合收尾时调用一次，因此可以对堆底层数组原地排序。
+// result 分数降序、并列分按 seq 升序；只在聚合收尾调用一次，可原地排序。
 func (k *leaderTopK) result() []LogRow {
 	entries := k.heap
 	sort.SliceStable(entries, func(i, j int) bool {
@@ -1029,21 +1009,18 @@ type groupAcc struct {
 	items map[string]*groupItem
 }
 
-// reservoirP95K 分组 P95 的采样容量：超过它的组用蓄水池采样近似，内存从
-// O(组样本数) 降到 O(K)。ua/joint 这类高基数分组在 20 万行窗口下原实现要
-// 存 ~5-11MB 样本，现在每组最多 K*8B。
+// reservoirP95K 分组 P95 的采样容量：高基数分组（ua/joint）在 20 万行窗口下
+// 原实现要存 ~5-11MB 样本，采样后每组最多 K*8B。
 const reservoirP95K = 1024
 
-// reservoirP95 是分组 P95 的有界采样器（Vitter R 蓄水池）。样本数 ≤ K 时全部
-// 保留，percentile 与全量计算逐位一致；超过后等概率抽样，随机数由组键播种，
-// 同一份输入算出的 P95 确定可复现。
+// reservoirP95 是分组 P95 的有界采样器（Vitter R 蓄水池）。样本数 ≤ K 时与全量
+// 计算逐位一致；随机数由组键播种，同一份输入结果可复现。
 type reservoirP95 struct {
 	seen   int
 	sample []float64
 	rng    *rand.Rand
 }
 
-// newReservoirP95 用组键的 FNV 哈希做随机种子，保证确定性。
 func newReservoirP95(key string) *reservoirP95 {
 	h := fnv.New32a()
 	h.Write([]byte(key))
@@ -1059,13 +1036,12 @@ func (r *reservoirP95) add(v float64) {
 		r.sample = append(r.sample, v)
 		return
 	}
-	// 第 seen 个样本以 K/seen 的概率换掉池内随机一位
 	if j := r.rng.Intn(r.seen); j < reservoirP95K {
 		r.sample[j] = v
 	}
 }
 
-// percentile 排序后取最近秩分位数；无样本时返回 0（与 Percentile 空入参行为一致）。
+// percentile 无样本时返回 0（与 Percentile 空入参行为一致）。
 func (r *reservoirP95) percentile(p float64) float64 {
 	SortFloats(r.sample)
 	return Percentile(r.sample, p)
@@ -1123,8 +1099,7 @@ func (a *groupAcc) item(name string) *groupItem {
 	return it
 }
 
-// count 把一条日志累计进分组。cost 由调用方传入（每行只算一次），
-// 而不是在此处重复调 Cost。
+// count 的 cost 由调用方传入，每行只算一次 Cost。
 func (a *groupAcc) count(it *groupItem, l models.ChatLog, cost float64) {
 	s := &it.stat
 	s.Total++
@@ -1220,13 +1195,10 @@ func head[T any](s []T, n int) []T {
 	return out
 }
 
-// firstChunkHistogramEdges 首包直方图的桶边界（秒）。与 webui FirstChunkHistogram
-// 原有的前端分桶完全一致：左闭右开、末桶兜底；现改由服务端分箱，前端只负责
-// 标签与渲染。
+// firstChunkHistogramEdges 首包直方图的桶边界（秒），与原 webui 前端分桶一致。
 var firstChunkHistogramEdges = []float64{0, 0.5, 1, 2, 3, 5, 8, 10, 15, 20, 30, 60}
 
-// buildFirstChunkHistogram 按固定边界把样本分箱。空输入返回全零桶（非 nil），
-// 前端渲染与旧空样本行为一致。
+// buildFirstChunkHistogram 空输入返回全零桶（非 nil）。
 func buildFirstChunkHistogram(samples []float64) *Histogram {
 	counts := make([]int64, len(firstChunkHistogramEdges))
 	var total int64
@@ -1244,8 +1216,7 @@ func buildFirstChunkHistogram(samples []float64) *Histogram {
 	return &Histogram{Edges: firstChunkHistogramEdges, Counts: counts, Total: total}
 }
 
-// nonNilFloats 同 head，保证浮点切片序列化为 `[]` 而非 `null`。
-// ratio 返回 a/b；b <= 0 时返回 0（而非 NaN/Inf，避免前端拿到不可序列化的值）。
+// ratio 返回 a/b；b <= 0 时返回 0（避免前端拿到 NaN/Inf）。
 func ratio(a, b int64) float64 {
 	if b <= 0 {
 		return 0

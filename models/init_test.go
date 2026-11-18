@@ -9,11 +9,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// closeOnCleanup 注册在测试结束时关闭连接。
-//
-// 必须有这一步：Windows 上文件被占用时 t.TempDir 的清理会失败。
-// t.Cleanup 为 LIFO，TempDir 的清理最早注册因而最后执行，
-// 所以此处注册的关闭一定跑在它之前。
+// closeOnCleanup 注册在测试结束时关闭连接：Windows 上文件被占用时 t.TempDir
+// 的清理会失败；Cleanup LIFO 保证这里注册的关闭先于 TempDir 清理执行。
 func closeOnCleanup(t *testing.T, db *gorm.DB) {
 	t.Helper()
 	t.Cleanup(func() {
@@ -61,7 +58,7 @@ func TestInit_BackfillsAuthKeyIOLogToFalse(t *testing.T) {
 	}
 
 	Init(context.Background(), path)
-	// Init 会另外打开一个连到同一文件的连接并写入包级 DB，同样需要关闭
+	// Init 另开的连接同样需要关闭
 	closeOnCleanup(t, DB)
 
 	authKey, err := gorm.G[AuthKey](DB).Where("key = ?", "legacy-key").First(context.Background())
@@ -77,8 +74,8 @@ func TestInit_BackfillsAuthKeyIOLogToFalse(t *testing.T) {
 	}
 }
 
-// chat_logs.backup 是后加的非指针 bool：老库经 AutoMigrate 加列后存量行为 NULL，
-// 不归一的话日志列表扫描 bool 会直接报错。这条测试去掉 init.go 里的回填就会红。
+// chat_logs.backup 不归一的话老库存量行 NULL 扫描 bool 直接报错；
+// 去掉 init.go 里的回填这条测试就会红。
 func TestInit_BackfillsChatLogBackupToFalse(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "llmio.db")
 
@@ -126,14 +123,11 @@ func TestInit_BackfillsChatLogBackupToFalse(t *testing.T) {
 	}
 }
 
-// chat_logs 的两条兼容回填只该在升级时跑一次：升级完成的库上它们永远命中
-// 0 行，却每次启动都要付两遍全表扫描。这条测试钉住三件事：有 NULL 行时回填
-// 生效、完成后标记落库、标记在时二次启动整段跳过。
+// chat_logs 兼容回填只该在升级时跑一次：NULL 行被回填、标记落库、标记在则二次启动跳过。
 func TestInitChatLogsBackfillRunsOnce(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "backfill-gate.db")
 
-	// 老库形态：chat_logs 有 auth_key_id 列但没有 backup 列（AutoMigrate 补列后
-	// 存量行全为 NULL，正是要回填的对象）
+	// 老库形态：有 auth_key_id 列但没有 backup 列
 	db, err := gorm.Open(sqlite.Open(path), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("failed to open seed database: %v", err)
@@ -192,8 +186,7 @@ func TestInitChatLogsBackfillRunsOnce(t *testing.T) {
 		}
 	})
 
-	// 再来一次启动。标记在，回填必须整段跳过：故意把一行改回 NULL，
-	// 二次启动后它应原样留着——这就是"跳过"的直接证据。
+	// 故意改回一行 NULL：二次启动后应原样留着，即回填被跳过的直接证据
 	if err := DB.Exec(`UPDATE chat_logs SET auth_key_id = NULL WHERE name = 'log-null'`).Error; err != nil {
 		t.Fatalf("造二次启动前的 NULL 行失败：%v", err)
 	}
@@ -210,8 +203,7 @@ func TestInitChatLogsBackfillRunsOnce(t *testing.T) {
 	})
 }
 
-// chatLogsNullRows 数 chat_logs 上某列为 NULL 的行数。用原生 SQL：NULL 的
-// uint/bool 扫进结构体会直接报错。
+// chatLogsNullRows 用原生 SQL：NULL 的 uint/bool 扫进结构体会直接报错。
 func chatLogsNullRows(t *testing.T, col string) int64 {
 	t.Helper()
 	var n int64

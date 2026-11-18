@@ -9,9 +9,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// event_logging 是 Claude Code 遥测的接收端：批次进来只回个计数，内容本身
-// 被丢弃。它注册在鉴权之外，两个上限防的是同一件事——被塞进超大 body 或
-// 超长数组，白白解码一轮再整包扔掉。
+// event_logging 注册在鉴权之外，两个上限防外部直接触发的解码放大：超大 body
+// 或超长数组白白解码一轮再整包丢弃。
 const (
 	maxEventLoggingBodyBytes = 1 << 20
 	maxEventLoggingEvents    = 1000

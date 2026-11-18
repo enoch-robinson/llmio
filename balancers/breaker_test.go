@@ -60,7 +60,7 @@ func withBreakerConfig(t *testing.T, maxFailures int, sleepWindow time.Duration,
 	})
 }
 
-// nodeState 读取指定 key 的熔断状态，要求节点必须已初始化。
+// nodeState 要求节点已初始化。
 func nodeState(t *testing.T, key uint) State {
 	t.Helper()
 	mu.Lock()
@@ -139,8 +139,7 @@ func TestBreakerDeleteTripsToOpen(t *testing.T) {
 	}
 }
 
-// 构造函数不得做全量扫描：任何预置状态（包括未剔除的 Open 节点）在构造后
-// 都必须原样保留，剔除与冷却到期迁移全部延迟到 Pop 命中该节点时进行。
+// 构造不得做全量扫描：预置状态原样保留，迁移全部延迟到 Pop 命中时。
 func TestBreakerWrapperDoesNotScan(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -173,7 +172,6 @@ func TestBreakerWrapperDoesNotScan(t *testing.T) {
 	}
 }
 
-// Pop 的惰性状态迁移与 Open 节点跳过：表驱动覆盖各状态的放行/剔除/迁移路径。
 func TestBreakerPopLazyTransitions(t *testing.T) {
 	errNoItems := errors.New("no provide items")
 
@@ -335,7 +333,6 @@ func TestBreakerPopLazyTransitions(t *testing.T) {
 	}
 }
 
-// HalfOpen 状态的探测迁移：失败立刻回 Open，成功达标后关闭熔断。
 func TestBreakerHalfOpenTransitions(t *testing.T) {
 	cases := []struct {
 		name   string
