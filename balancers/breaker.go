@@ -1,6 +1,7 @@
 package balancers
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -38,31 +39,57 @@ type Breaker struct {
 	Balancer
 }
 
+// BalancerWrapperBreaker 按请求包装 balancer。这里刻意不做全量扫描：
+// balancer 每个请求都会新建，若在构造时遍历所有节点（旧实现），
+// 全局锁 mu 会成为全进程请求的串行化点。Open 节点的剔除与冷却到期
+// 迁移改为在 Pop 命中具体节点时惰性完成，锁内工作从 O(全部节点) 降为 O(1)。
 func BalancerWrapperBreaker(balancer Balancer) *Breaker {
-	mu.Lock()
-	defer mu.Unlock()
-	for key, node := range nodes {
-		if node.state == StateOpen && node.expiry.Before(time.Now()) {
-			node.Reset(StateHalfOpen)
-		}
-		if node.state == StateOpen {
-			balancer.Delete(key)
-		}
-	}
 	return &Breaker{Balancer: balancer}
 }
 
+// Pop 抽取候选并跳过熔断中的节点：Open 且未过期的节点从本请求的候选池
+// 剔除后继续抽下一个；Open 且已过期（SleepWindow 冷却结束）的节点在锁内
+// 迁移为 HalfOpen 并放行探测；其余状态直接放行。候选耗尽时透传底层
+// balancer 的既有错误。
 func (b *Breaker) Pop() (uint, error) {
-	key, err := b.Balancer.Pop()
-	if err != nil {
-		return 0, err
+	var skipped map[uint]struct{}
+	for {
+		key, err := b.Balancer.Pop()
+		if err != nil {
+			return 0, err
+		}
+		if b.allow(key) {
+			return key, nil
+		}
+		if skipped == nil {
+			skipped = make(map[uint]struct{})
+		}
+		if _, seen := skipped[key]; seen {
+			// 底层 balancer 若未按约定在 Delete 后缩小候选池（Pop 重复给出
+			// 同一节点），及时终止避免死循环。
+			return 0, fmt.Errorf("all candidate nodes are in open state")
+		}
+		skipped[key] = struct{}{}
+		// 走底层 Delete：这里只是把熔断节点移出本次调度，不能计入失败。
+		b.Balancer.Delete(key)
 	}
+}
+
+// allow 判断 key 能否参与本次调度，并在锁内完成该节点的惰性状态迁移；
+// 首次出现的 key 初始化为 Closed。
+func (b *Breaker) allow(key uint) bool {
 	mu.Lock()
 	defer mu.Unlock()
-	if _, ok := nodes[key]; !ok {
-		nodes[key] = &Node{state: StateClosed}
+	node, ok := nodes[key]
+	if !ok {
+		nodes[key] = new(Node{state: StateClosed})
+		return true
 	}
-	return key, nil
+	if node.state == StateOpen && node.expiry.Before(time.Now()) {
+		node.Reset(StateHalfOpen)
+		return true
+	}
+	return node.state != StateOpen
 }
 
 func (b *Breaker) Delete(key uint) {
