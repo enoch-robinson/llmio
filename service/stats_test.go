@@ -644,8 +644,11 @@ func TestAggregateEmptyInput(t *testing.T) {
 		res.TopTps == nil || res.Slowest == nil || res.RecentError == nil {
 		t.Fatal("空输入的集合应为非 nil 空切片")
 	}
-	if res.Latency.FirstChunk.List == nil || res.Latency.Tps.List == nil || res.Latency.Proxy.List == nil {
-		t.Fatal("延迟分布列表应为非 nil 空切片，避免前端拿到 null")
+	if res.Latency.FirstChunk.Histogram == nil || res.Latency.FirstChunk.Histogram.Counts == nil {
+		t.Fatal("首包直方图应为非 nil（空输入也回全零桶），避免前端拿到 null")
+	}
+	if res.Latency.Tps.Histogram != nil || res.Latency.Proxy.Histogram != nil {
+		t.Fatal("tps/proxy 不应下发直方图（全量样本已从契约移除）")
 	}
 	if res.BucketMs <= 0 {
 		t.Fatalf("BucketMs 应已被解析，实得 %d", res.BucketMs)
@@ -1301,8 +1304,8 @@ func TestAggregateLatency(t *testing.T) {
 
 	res := AggregateWithBucket(logs, StatsFilter{}, time.Hour)
 
-	if len(res.Latency.FirstChunk.List) != 10 {
-		t.Fatalf("首包样本应只含 10 条成功请求，实得 %d", len(res.Latency.FirstChunk.List))
+	if res.Latency.FirstChunk.Histogram == nil || res.Latency.FirstChunk.Histogram.Total != 10 {
+		t.Fatalf("首包直方图应只含 10 条成功请求，实得 %+v", res.Latency.FirstChunk.Histogram)
 	}
 
 	// 最近秩：n=10 时 idx = floor(9*p)。
@@ -1335,12 +1338,139 @@ func TestAggregateLatency(t *testing.T) {
 	if diff := res.Latency.Proxy.Avg - 5500; diff > 1e-9 || diff < -1e-9 {
 		t.Fatalf("代理耗时均值应为 5500ms，实得 %v", res.Latency.Proxy.Avg)
 	}
-	// 列表需升序，供前端直接画直方图
-	for i := 1; i < len(res.Latency.Proxy.List); i++ {
-		if res.Latency.Proxy.List[i] < res.Latency.Proxy.List[i-1] {
-			t.Fatalf("延迟列表必须升序：%v", res.Latency.Proxy.List)
+	// tps/proxy 的全量样本列表已从契约移除，只回分位数
+	if res.Latency.Tps.Histogram != nil || res.Latency.Proxy.Histogram != nil {
+		t.Fatal("tps/proxy 不应携带直方图")
+	}
+}
+
+// TestAggregateFirstChunkHistogram 钉住服务端分箱的分桶语义：左闭右开、末桶
+// 兜底 ≥ 末边界，counts 之和等于 total；边界与 webui FirstChunkHistogram 原有
+// 前端分桶一致。
+func TestAggregateFirstChunkHistogram(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 9, 29, 10, 0, 0, 0, time.UTC)
+	// fc 值覆盖：桶下界（0s→桶0）、桶上界恰好落在下一桶（0.5s→桶1）、中间值
+	//（1.5s→桶2）、末边界（60s→末桶）、超末边界（120s→末桶）
+	fcs := []time.Duration{0, 500 * time.Millisecond, 1500 * time.Millisecond, time.Second * 60, time.Second * 120}
+	wantIdx := []int{0, 1, 2, len(firstChunkHistogramEdges) - 1, len(firstChunkHistogramEdges) - 1}
+
+	logs := make([]models.ChatLog, 0, len(fcs))
+	for i, fc := range fcs {
+		l := logAt(uint(i+1), base, consts.StatusSuccess)
+		l.FirstChunkTime = fc
+		logs = append(logs, l)
+	}
+	// 失败/在途不进直方图
+	for i := 0; i < 2; i++ {
+		l := logAt(uint(len(fcs)+i+1), base, consts.StatusError)
+		l.FirstChunkTime = 999 * time.Millisecond
+		logs = append(logs, l)
+	}
+
+	h := AggregateWithBucket(logs, StatsFilter{}, time.Hour).Latency.FirstChunk.Histogram
+	if h == nil {
+		t.Fatal("firstChunk 直方图不应为 nil")
+	}
+	if h.Total != int64(len(fcs)) {
+		t.Fatalf("total 应为 %d，实得 %d", len(fcs), h.Total)
+	}
+	var sum int64
+	for _, c := range h.Counts {
+		sum += c
+	}
+	if sum != h.Total {
+		t.Fatalf("counts 之和应等于 total：sum=%d total=%d", sum, h.Total)
+	}
+	if len(h.Counts) != len(firstChunkHistogramEdges) || len(h.Edges) != len(firstChunkHistogramEdges) {
+		t.Fatalf("edges/counts 长度应为 %d，实得 edges=%d counts=%d", len(firstChunkHistogramEdges), len(h.Edges), len(h.Counts))
+	}
+	for i, want := range wantIdx {
+		if h.Counts[want] == 0 {
+			t.Fatalf("fc=%v 应落在桶 %d（边界 %v），该桶为空：%+v", fcs[i], want, h.Edges, h.Counts)
 		}
 	}
+	if h.Counts[len(firstChunkHistogramEdges)-1] != 2 {
+		t.Fatalf("末桶应收 60s/120s 两条，实得 %d", h.Counts[len(firstChunkHistogramEdges)-1])
+	}
+}
+
+// TestAggregateGroupP95Reservoir 钉住分组 P95 的采样契约：
+//   - 样本数 ≤ K：与全量最近秩计算逐位一致；
+//   - 样本数 > K：采样池截到 K，P95 与全量真值的偏差在平滑分布下有界；
+//   - 固定播种：同一份输入两次聚合结果完全一致。
+func TestAggregateGroupP95Reservoir(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 9, 29, 10, 0, 0, 0, time.UTC)
+	mk := func(id uint, fcMs int) models.ChatLog {
+		l := logAt(id, base, consts.StatusSuccess)
+		l.FirstChunkTime = time.Duration(fcMs) * time.Millisecond
+		return l
+	}
+
+	t.Run("小组精确（≤K 逐位一致）", func(t *testing.T) {
+		t.Parallel()
+
+		logs := make([]models.ChatLog, 0, 100)
+		for i := 1; i <= 100; i++ {
+			logs = append(logs, mk(uint(i), i)) // 1..100ms
+		}
+		res := AggregateWithBucket(logs, StatsFilter{}, time.Hour)
+		// 最近秩：idx = floor(99*0.95) = 94 → 95ms
+		if got := res.ByName[0].P95FirstChunkMs; got != 95 {
+			t.Fatalf("小组 P95 应精确等于 95ms，实得 %v", got)
+		}
+	})
+
+	t.Run("大组截到 K 且 P95 有界偏差", func(t *testing.T) {
+		t.Parallel()
+
+		const n = 50_000
+		samples := make([]float64, 0, n)
+		logs := make([]models.ChatLog, 0, n)
+		for i := 0; i < n; i++ {
+			fc := float64(i%3000) + 1 // 1..3000ms 循环
+			samples = append(samples, fc)
+			logs = append(logs, mk(uint(i+1), int(fc)))
+		}
+		res := AggregateWithBucket(logs, StatsFilter{}, time.Hour)
+		got := res.ByName[0].P95FirstChunkMs
+
+		a := newGroupAcc()
+		it := a.item("probe")
+		for _, l := range logs {
+			a.count(it, l, 0)
+		}
+		if it.p95Samples.seen != n {
+			t.Fatalf("seen 应为 %d，实得 %d", n, it.p95Samples.seen)
+		}
+		if len(it.p95Samples.sample) != reservoirP95K {
+			t.Fatalf("采样池应截到 K=%d，实得 %d", reservoirP95K, len(it.p95Samples.sample))
+		}
+
+		v := append([]float64(nil), samples...)
+		SortFloats(v)
+		exact := Percentile(v, 0.95)
+		if got < exact*0.9 || got > exact*1.1 {
+			t.Fatalf("大组 P95 应接近真值 %v（±10%%），实得 %v", exact, got)
+		}
+	})
+
+	t.Run("同一输入确定性可复现", func(t *testing.T) {
+		t.Parallel()
+
+		logs := make([]models.ChatLog, 0, 5000)
+		for i := 0; i < 5000; i++ {
+			logs = append(logs, mk(uint(i+1), (i*37)%2900+1))
+		}
+		p1 := AggregateWithBucket(logs, StatsFilter{}, time.Hour).ByName[0].P95FirstChunkMs
+		p2 := AggregateWithBucket(logs, StatsFilter{}, time.Hour).ByName[0].P95FirstChunkMs
+		if p1 != p2 {
+			t.Fatalf("固定播种下 P95 应可复现：%v != %v", p1, p2)
+		}
+	})
 }
 
 func TestAggregateLeaderboards(t *testing.T) {

@@ -548,6 +548,14 @@ export interface ErrorGroup {
   samples: ErrorSample[];
 }
 
+export interface Histogram {
+  /** 桶边界（秒），左闭右开；末桶兑底所有 ≥ 末边界的样本 */
+  edges: number[];
+  /** counts[i] = 落在 [edges[i], edges[i+1]) 的样本数，末桶为兑底桶 */
+  counts: number[];
+  total: number;
+}
+
 export interface LatencyStat {
   p50: number;
   p90: number;
@@ -555,8 +563,8 @@ export interface LatencyStat {
   p99: number;
   avg: number;
   max: number;
-  /** 已升序排序的原始样本，可直接画分布 */
-  list: number[];
+  /** 预分箱直方图，只在 firstChunk 上填充；tps/proxy 只需要分位数 */
+  histogram?: Histogram;
 }
 
 export interface StatsLogRow {

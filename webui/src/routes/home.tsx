@@ -271,7 +271,15 @@ export default function Home() {
                 title={t("home:latency.title")}
                 note={t("home:latency.percentile_note")}
               >
-                <FirstChunkHistogram samples={stats!.latency.firstChunk.list} />
+                <FirstChunkHistogram
+                  histogram={
+                    stats!.latency.firstChunk.histogram ?? {
+                      edges: [],
+                      counts: [],
+                      total: 0,
+                    }
+                  }
+                />
                 <PercentileRow stats={stats!} />
               </Panel>
 

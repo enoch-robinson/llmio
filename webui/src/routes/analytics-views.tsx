@@ -243,11 +243,13 @@ export function LatencyView({ stats }: { stats: StatsResult }) {
     <div className="flex flex-col gap-3">
       <Panel
         title={t("latency.distribution")}
-        note={`${t("latency.samples", { count: fc.list.length })} · ${t(
+        note={`${t("latency.samples", { count: fc.histogram?.total ?? 0 })} · ${t(
           "latency.histogram_note"
         )} · ${t("latency.percentile_note")}`}
       >
-        <FirstChunkHistogram samples={fc.list} />
+        <FirstChunkHistogram
+          histogram={fc.histogram ?? { edges: [], counts: [], total: 0 }}
+        />
         <div className="mt-3 grid grid-cols-3 gap-2 border-t border-border pt-3 sm:grid-cols-6">
           {percentiles.map((p) => (
             <div key={p.label}>

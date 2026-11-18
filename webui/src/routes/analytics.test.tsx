@@ -111,9 +111,21 @@ function fixture(over: Partial<StatsResult> = {}): StatsResult {
       { ts: 1_759_981_800_000, total: 1, success: 0, error: 1, running: 0, tokens: 0, prompt: 0, completion: 0, cached: 0, cost: 0, avgTps: 0, avgFirstChunkMs: 0 },
     ],
     latency: {
-      firstChunk: { p50: 1, p90: 2, p95: 3, p99: 4, avg: 1.5, max: 5, list: [1, 1.2, 2, 3, 5] },
-      tps: { p50: 40, p90: 60, p95: 70, p99: 88, avg: 42, max: 88, list: [30, 40, 88] },
-      proxyMs: { p50: 1400, p90: 1800, p95: 2000, p99: 2400, avg: 1500, max: 2500, list: [1200, 1500, 2500] },
+      firstChunk: {
+        p50: 1,
+        p90: 2,
+        p95: 3,
+        p99: 4,
+        avg: 1.5,
+        max: 5,
+        histogram: {
+          edges: [0, 0.5, 1, 2, 3, 5, 8, 10, 15, 20, 30, 60],
+          counts: [1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0],
+          total: 5,
+        },
+      },
+      tps: { p50: 40, p90: 60, p95: 70, p99: 88, avg: 42, max: 88 },
+      proxyMs: { p50: 1400, p90: 1800, p95: 2000, p99: 2400, avg: 1500, max: 2500 },
     },
     topTps: [
       { id: 7, createdAt: 1_759_981_800_000, model: "gpt-test", provider: "prov-a", keyName: "admin", tps: 88, firstChunkMs: 900, completionTokens: 500, promptTokens: 1000, retry: 0 },

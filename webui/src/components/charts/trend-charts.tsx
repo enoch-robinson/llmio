@@ -21,7 +21,7 @@ import {
 } from "@/components/ui/chart"
 import { bucketLabelFormatter, compactNumber, currencySymbol, formatCost } from "@/lib/format"
 import { seriesVar } from "@/lib/palette"
-import type { TrendPoint } from "@/lib/api"
+import type { Histogram, TrendPoint } from "@/lib/api"
 
 /**
  * 请求趋势。
@@ -246,22 +246,11 @@ export function CostTrendChart({ data, currency }: { data: TrendPoint[]; currenc
  * 着色用**单一顺序色阶**而非红/绿阈值：把连续量按阈值染成对立色，等于把
  * "多少"伪装成"好坏"，且红绿对立对色盲用户失效。真正的阈值告警应另外呈现。
  */
-export function FirstChunkHistogram({ samples }: { samples: number[] }) {
+export function FirstChunkHistogram({ histogram }: { histogram: Histogram }) {
   const { t } = useTranslation("home")
 
   const bins = useMemo(() => {
-    const edges = [0, 0.5, 1, 2, 3, 5, 8, 10, 15, 20, 30, 60]
-    const counts = new Array(edges.length).fill(0)
-    for (const s of samples) {
-      let i = edges.length - 1
-      for (let j = 0; j < edges.length - 1; j++) {
-        if (s >= edges[j] && s < edges[j + 1]) {
-          i = j
-          break
-        }
-      }
-      counts[i]++
-    }
+    const { edges, counts } = histogram
     const labels = edges.map((e, i) =>
       i === edges.length - 1 ? `≥${e}s` : `${e}–${edges[i + 1]}s`
     )
@@ -269,7 +258,7 @@ export function FirstChunkHistogram({ samples }: { samples: number[] }) {
     let last = counts.length - 1
     while (last > 0 && counts[last] === 0) last--
     return labels.slice(0, last + 1).map((label, i) => ({ label, count: counts[i], i }))
-  }, [samples])
+  }, [histogram])
 
   const config = { count: { label: t("latency.count") } } satisfies ChartConfig
 

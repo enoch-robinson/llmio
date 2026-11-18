@@ -4,7 +4,9 @@ import (
 	"container/heap"
 	"context"
 	"fmt"
+	"hash/fnv"
 	"math"
+	"math/rand"
 	"regexp"
 	"sort"
 	"strconv"
@@ -441,15 +443,26 @@ type CountItem struct {
 	Count int64  `json:"count"`
 }
 
+// Histogram 是预分箱的样本分布：counts[i] 统计落在 [edges[i], edges[i+1]) 的
+// 样本，末桶兜底所有 ≥ 末边界的样本；total 为样本总数。边界随响应下发，
+// 前端不再自持常量，避免两端漂移。
+type Histogram struct {
+	Edges  []float64 `json:"edges"`
+	Counts []int64   `json:"counts"`
+	Total  int64     `json:"total"`
+}
+
 // LatencyStat 是一组延迟分布。
 type LatencyStat struct {
-	P50  float64   `json:"p50"`
-	P90  float64   `json:"p90"`
-	P95  float64   `json:"p95"`
-	P99  float64   `json:"p99"`
-	Avg  float64   `json:"avg"`
-	Max  float64   `json:"max"`
-	List []float64 `json:"list"`
+	P50 float64 `json:"p50"`
+	P90 float64 `json:"p90"`
+	P95 float64 `json:"p95"`
+	P99 float64 `json:"p99"`
+	Avg float64 `json:"avg"`
+	Max float64 `json:"max"`
+	// Histogram 只在 firstChunk 上填充：前端画分布图用；tps/proxy 只需要
+	// 分位数，不再下发全量样本（响应体随窗口行数线性膨胀，之前可到 MB 级）。
+	Histogram *Histogram `json:"histogram,omitempty"`
 }
 
 // LogRow 是排行榜里的一行。
@@ -817,17 +830,18 @@ func aggregateWithBucketIter(f StatsFilter, bucket time.Duration, next statsLogI
 		FirstChunk: LatencyStat{
 			P50: Percentile(firstChunkSecs, 0.50), P90: Percentile(firstChunkSecs, 0.90),
 			P95: Percentile(firstChunkSecs, 0.95), P99: Percentile(firstChunkSecs, 0.99),
-			Avg: mean(firstChunkSecs), Max: maxOf(firstChunkSecs), List: nonNilFloats(firstChunkSecs),
+			Avg: mean(firstChunkSecs), Max: maxOf(firstChunkSecs),
+			Histogram: buildFirstChunkHistogram(firstChunkSecs),
 		},
 		Tps: LatencyStat{
 			P50: Percentile(tpsVals, 0.50), P90: Percentile(tpsVals, 0.90),
 			P95: Percentile(tpsVals, 0.95), P99: Percentile(tpsVals, 0.99),
-			Avg: mean(tpsVals), Max: maxOf(tpsVals), List: nonNilFloats(tpsVals),
+			Avg: mean(tpsVals), Max: maxOf(tpsVals),
 		},
 		Proxy: LatencyStat{
 			P50: Percentile(proxyMsVals, 0.50), P90: Percentile(proxyMsVals, 0.90),
 			P95: Percentile(proxyMsVals, 0.95), P99: Percentile(proxyMsVals, 0.99),
-			Avg: mean(proxyMsVals), Max: maxOf(proxyMsVals), List: nonNilFloats(proxyMsVals),
+			Avg: mean(proxyMsVals), Max: maxOf(proxyMsVals),
 		},
 	}
 
@@ -1015,10 +1029,52 @@ type groupAcc struct {
 	items map[string]*groupItem
 }
 
+// reservoirP95K 分组 P95 的采样容量：超过它的组用蓄水池采样近似，内存从
+// O(组样本数) 降到 O(K)。ua/joint 这类高基数分组在 20 万行窗口下原实现要
+// 存 ~5-11MB 样本，现在每组最多 K*8B。
+const reservoirP95K = 1024
+
+// reservoirP95 是分组 P95 的有界采样器（Vitter R 蓄水池）。样本数 ≤ K 时全部
+// 保留，percentile 与全量计算逐位一致；超过后等概率抽样，随机数由组键播种，
+// 同一份输入算出的 P95 确定可复现。
+type reservoirP95 struct {
+	seen   int
+	sample []float64
+	rng    *rand.Rand
+}
+
+// newReservoirP95 用组键的 FNV 哈希做随机种子，保证确定性。
+func newReservoirP95(key string) *reservoirP95 {
+	h := fnv.New32a()
+	h.Write([]byte(key))
+	return &reservoirP95{
+		sample: make([]float64, 0, reservoirP95K),
+		rng:    rand.New(rand.NewSource(int64(h.Sum32()))),
+	}
+}
+
+func (r *reservoirP95) add(v float64) {
+	r.seen++
+	if len(r.sample) < reservoirP95K {
+		r.sample = append(r.sample, v)
+		return
+	}
+	// 第 seen 个样本以 K/seen 的概率换掉池内随机一位
+	if j := r.rng.Intn(r.seen); j < reservoirP95K {
+		r.sample[j] = v
+	}
+}
+
+// percentile 排序后取最近秩分位数；无样本时返回 0（与 Percentile 空入参行为一致）。
+func (r *reservoirP95) percentile(p float64) float64 {
+	SortFloats(r.sample)
+	return Percentile(r.sample, p)
+}
+
 type groupItem struct {
 	stat        GroupStat
 	tpsSum      float64
-	firstChunk  []float64
+	p95Samples  *reservoirP95
 	proxySum    float64
 	firstSum    float64
 	successSeen int64
@@ -1061,7 +1117,7 @@ func (a *groupAcc) item(name string) *groupItem {
 	name = dashIfEmpty(name)
 	it, ok := a.items[name]
 	if !ok {
-		it = &groupItem{stat: GroupStat{Name: name}}
+		it = &groupItem{stat: GroupStat{Name: name}, p95Samples: newReservoirP95(name)}
 		a.items[name] = it
 	}
 	return it
@@ -1094,7 +1150,7 @@ func (a *groupAcc) count(it *groupItem, l models.ChatLog, cost float64) {
 		it.tpsSum += l.Tps
 		fc := durationToMs(l.FirstChunkTime)
 		it.firstSum += fc
-		it.firstChunk = append(it.firstChunk, fc)
+		it.p95Samples.add(fc)
 		it.proxySum += durationToMs(l.ProxyTime)
 	}
 }
@@ -1111,8 +1167,7 @@ func (a *groupAcc) result() []GroupStat {
 			s.AvgFirstChunkMs = it.firstSum / float64(it.successSeen)
 			s.AvgProxyMs = it.proxySum / float64(it.successSeen)
 		}
-		SortFloats(it.firstChunk)
-		s.P95FirstChunkMs = Percentile(it.firstChunk, 0.95)
+		s.P95FirstChunkMs = it.p95Samples.percentile(0.95)
 		out = append(out, s)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
@@ -1165,14 +1220,31 @@ func head[T any](s []T, n int) []T {
 	return out
 }
 
-// nonNilFloats 同 head，保证浮点切片序列化为 `[]` 而非 `null`。
-func nonNilFloats(v []float64) []float64 {
-	if v == nil {
-		return []float64{}
+// firstChunkHistogramEdges 首包直方图的桶边界（秒）。与 webui FirstChunkHistogram
+// 原有的前端分桶完全一致：左闭右开、末桶兜底；现改由服务端分箱，前端只负责
+// 标签与渲染。
+var firstChunkHistogramEdges = []float64{0, 0.5, 1, 2, 3, 5, 8, 10, 15, 20, 30, 60}
+
+// buildFirstChunkHistogram 按固定边界把样本分箱。空输入返回全零桶（非 nil），
+// 前端渲染与旧空样本行为一致。
+func buildFirstChunkHistogram(samples []float64) *Histogram {
+	counts := make([]int64, len(firstChunkHistogramEdges))
+	var total int64
+	for _, s := range samples {
+		i := len(counts) - 1
+		for j := 0; j < len(counts)-1; j++ {
+			if s >= firstChunkHistogramEdges[j] && s < firstChunkHistogramEdges[j+1] {
+				i = j
+				break
+			}
+		}
+		counts[i]++
+		total++
 	}
-	return v
+	return &Histogram{Edges: firstChunkHistogramEdges, Counts: counts, Total: total}
 }
 
+// nonNilFloats 同 head，保证浮点切片序列化为 `[]` 而非 `null`。
 // ratio 返回 a/b；b <= 0 时返回 0（而非 NaN/Inf，避免前端拿到不可序列化的值）。
 func ratio(a, b int64) float64 {
 	if b <= 0 {
