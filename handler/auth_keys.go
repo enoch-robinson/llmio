@@ -11,6 +11,7 @@ import (
 	"github.com/atopos31/llmio/consts"
 	"github.com/atopos31/llmio/models"
 	"github.com/atopos31/llmio/pkg/token"
+	"github.com/atopos31/llmio/service"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
@@ -131,6 +132,7 @@ func CreateAuthKey(c *gin.Context) {
 		common.InternalServerError(c, "Failed to create auth key: "+err.Error())
 		return
 	}
+	service.InvalidateAuthKeyCache()
 
 	common.Success(c, authKey)
 }
@@ -206,6 +208,7 @@ func UpdateAuthKey(c *gin.Context) {
 		common.InternalServerError(c, "Failed to load updated auth key: "+err.Error())
 		return
 	}
+	service.InvalidateAuthKeyCache()
 
 	common.Success(c, updated)
 }
@@ -222,6 +225,7 @@ func DeleteAuthKey(c *gin.Context) {
 		common.InternalServerError(c, "Failed to delete auth key: "+err.Error())
 		return
 	}
+	service.InvalidateAuthKeyCache()
 	common.SuccessWithMessage(c, "Deleted", gin.H{"id": id})
 }
 
@@ -257,6 +261,7 @@ func ToggleAuthKeyStatus(c *gin.Context) {
 		common.InternalServerError(c, "Failed to update status: "+err.Error())
 		return
 	}
+	service.InvalidateAuthKeyCache()
 
 	// 返回更新后的记录
 	authKey.Status = &newStatus

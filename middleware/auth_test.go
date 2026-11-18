@@ -8,6 +8,7 @@ import (
 
 	"github.com/atopos31/llmio/consts"
 	"github.com/atopos31/llmio/models"
+	"github.com/atopos31/llmio/service"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -28,6 +29,9 @@ func setupTestDB(t *testing.T) (*gorm.DB, func()) {
 
 	// Set the global DB
 	models.DB = db
+	// 鉴权 Key 缓存是包级状态，跨测试存活；每个用例都是独立内存库，不清空会
+	// 把上一个库的缓存结果带进来。
+	service.InvalidateAuthKeyCache()
 
 	// Return cleanup function
 	cleanup := func() {

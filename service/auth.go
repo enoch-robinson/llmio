@@ -14,7 +14,31 @@ import (
 
 var singleFlightGroup singleflight.Group
 
+// authKeyCacheTTL 鉴权 Key 缓存有效期。
+//
+// GetAuthKey 跑在每个 API 请求的鉴权中间件里；Key 及其权限是管理端改一次管
+// 很久的数据，短 TTL + 写后失效（handler 的 auth-keys 增删改）比每请求查库
+// 划算。绕过 API 直接改库的变更最迟一个 TTL 后生效。
+const authKeyCacheTTL = 15 * time.Second
+
+var (
+	authKeyCacheMu sync.RWMutex
+	authKeyCache   = make(map[string]authKeyCacheEntry)
+)
+
+type authKeyCacheEntry struct {
+	authKey *models.AuthKey
+	at      time.Time
+}
+
 func GetAuthKey(ctx context.Context, key string) (*models.AuthKey, error) {
+	authKeyCacheMu.RLock()
+	if entry, ok := authKeyCache[key]; ok && time.Since(entry.at) < authKeyCacheTTL {
+		authKeyCacheMu.RUnlock()
+		return entry.authKey, nil
+	}
+	authKeyCacheMu.RUnlock()
+
 	ch := singleFlightGroup.DoChan(key, func() (any, error) {
 		authKey, err := gorm.G[models.AuthKey](models.DB).Where("key = ?", key).Where("status = ?", true).First(ctx)
 		return &authKey, err
@@ -22,10 +46,24 @@ func GetAuthKey(ctx context.Context, key string) (*models.AuthKey, error) {
 
 	select {
 	case r := <-ch:
-		return r.Val.(*models.AuthKey), r.Err
+		if r.Err != nil {
+			return nil, r.Err
+		}
+		authKey := r.Val.(*models.AuthKey)
+		authKeyCacheMu.Lock()
+		authKeyCache[key] = authKeyCacheEntry{authKey: authKey, at: time.Now()}
+		authKeyCacheMu.Unlock()
+		return authKey, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// InvalidateAuthKeyCache 清空鉴权 Key 缓存，供 AuthKey 增删改后调用。
+func InvalidateAuthKeyCache() {
+	authKeyCacheMu.Lock()
+	authKeyCache = make(map[string]authKeyCacheEntry)
+	authKeyCacheMu.Unlock()
 }
 
 type KeyUpdateItem struct {

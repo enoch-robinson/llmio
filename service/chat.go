@@ -222,6 +222,9 @@ func BalanceChat(ctx context.Context, start time.Time, style string, before Befo
 
 	timer := time.NewTimer(time.Second * time.Duration(providersWithMeta.TimeOut))
 	defer timer.Stop()
+	// 自愈策略每请求读一次：同一次请求的各次重试共用同一策略，没必要每个
+	// attempt 都查一遍库。
+	selfHeal := GetSelfHealPolicy(ctx)
 	for retry := range providersWithMeta.MaxRetry {
 		select {
 		case <-ctx.Done():
@@ -362,7 +365,6 @@ func BalanceChat(ctx context.Context, start time.Time, style string, before Befo
 			// extra_body（同一家上游的翻译产物是确定的）；drops 随本轮外层迭代
 			// 生命周期，不跨家携带——A 家不收的参数 B 家可能收，每家用一次 400
 			// 换判据，代价可接受。自愈成功不触发 Delete，不污染熔断计数。
-			selfHeal := GetSelfHealPolicy(ctx)
 			maxDrops := selfHeal.MaxDrops
 			if maxDrops <= 0 {
 				maxDrops = SelfHealMaxDrops

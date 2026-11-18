@@ -252,6 +252,9 @@ func TestBalanceChatSelfHealDisabled(t *testing.T) {
 	if err := models.DB.Create(&models.Config{Key: models.KeySelfHealPolicy, Value: policy}).Error; err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
+	// 策略有 TTL 缓存（先跑的用例已把默认策略灌进去），直接改库不会失效
+	InvalidateSelfHealPolicy()
+	t.Cleanup(InvalidateSelfHealPolicy)
 
 	up := &pickyUpstream{errors: []string{"Unrecognized request argument supplied: top_k"}}
 	server := httptest.NewServer(http.HandlerFunc(up.handler))

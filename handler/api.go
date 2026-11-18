@@ -1046,6 +1046,9 @@ func UpdateConfigByKey(c *gin.Context) {
 	if key == models.KeyPeakCalendar {
 		service.InvalidatePeakCalendar()
 	}
+	if key == models.KeySelfHealPolicy {
+		service.InvalidateSelfHealPolicy()
+	}
 
 	common.Success(c, map[string]string{
 		"key":   config.Key,

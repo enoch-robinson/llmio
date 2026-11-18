@@ -114,8 +114,9 @@ func checkAuthKey(c *gin.Context, key string, adminToken string) {
 		c.Abort()
 		return
 	}
-	// 异步更新使用次数
-	go service.KeyUpdate(authKey.ID, time.Now())
+	// 同步更新使用次数：KeyUpdate 只是 mutex + map 写入（纳秒级），DB 写由
+	// 后台批量 flusher 承担，起 goroutine 反而是每请求多一次调度开销。
+	service.KeyUpdate(authKey.ID, time.Now())
 
 	ctx = context.WithValue(ctx, consts.ContextKeyAuthKeyID, authKey.ID)
 	ctx = context.WithValue(ctx, consts.ContextKeyAuthKeyIOLog, lo.FromPtrOr(authKey.IOLog, false))

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -143,20 +145,51 @@ func DefaultSelfHealPolicy() *models.SelfHealPolicy {
 	return &models.SelfHealPolicy{Enabled: true, MaxDrops: SelfHealMaxDrops}
 }
 
-// GetSelfHealPolicy 读自愈策略。缺行、空值、坏 JSON 一律回默认继续服务——
-// 一个装饰性配置读坏了不该让请求跟着失败。每请求一次单行 KV 点查，与转发
-// 路径上既有的关联表读同量级，v1 不做缓存。
+// selfHealCacheTTL 自愈策略缓存有效期。
+//
+// 读侧在每个聊天请求的转发路径上；策略是管理端改一次管很久的数据，
+// 短 TTL + 写后失效（见 handler.UpdateConfigByKey）比每请求查库划算。
+const selfHealCacheTTL = 30 * time.Second
+
+var (
+	selfHealMu       sync.RWMutex
+	selfHealCached   *models.SelfHealPolicy
+	selfHealCachedAt time.Time
+)
+
+// GetSelfHealPolicy 读自愈策略（带短 TTL 缓存）。缺行、空值、坏 JSON 一律
+// 回默认继续服务——一个装饰性配置读坏了不该让请求跟着失败。
 func GetSelfHealPolicy(ctx context.Context) *models.SelfHealPolicy {
+	selfHealMu.RLock()
+	if selfHealCached != nil && time.Since(selfHealCachedAt) < selfHealCacheTTL {
+		policy := selfHealCached
+		selfHealMu.RUnlock()
+		return policy
+	}
+	selfHealMu.RUnlock()
+
 	config, err := gorm.G[models.Config](models.DB).
 		Where("key = ?", models.KeySelfHealPolicy).First(ctx)
-	if err != nil || strings.TrimSpace(config.Value) == "" {
-		return DefaultSelfHealPolicy()
-	}
 	policy := DefaultSelfHealPolicy()
-	if err := json.Unmarshal([]byte(config.Value), policy); err != nil {
-		return DefaultSelfHealPolicy()
+	if err == nil && strings.TrimSpace(config.Value) != "" {
+		if err := json.Unmarshal([]byte(config.Value), policy); err != nil {
+			policy = DefaultSelfHealPolicy()
+		}
 	}
+
+	selfHealMu.Lock()
+	selfHealCached = policy
+	selfHealCachedAt = time.Now()
+	selfHealMu.Unlock()
 	return policy
+}
+
+// InvalidateSelfHealPolicy 使自愈策略缓存失效，供配置写入后调用。
+func InvalidateSelfHealPolicy() {
+	selfHealMu.Lock()
+	selfHealCached = nil
+	selfHealCachedAt = time.Time{}
+	selfHealMu.Unlock()
 }
 
 // EnsureSelfHealPolicyConfig 在缺行时落一行默认策略。可重复调用。
