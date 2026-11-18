@@ -460,6 +460,29 @@ func TestResolveMultiplierUnknownTimezoneFallsBack(t *testing.T) {
 	}
 }
 
+func TestTzLocationCache(t *testing.T) {
+	t.Parallel()
+
+	// 同名两次调用必须返回同一指针：缓存是 tzLocation 存在的全部意义，
+	// 若每次都回源 LoadLocation，热路径上每请求都要重付 tzdata 解析成本。
+	first := tzLocation("Asia/Shanghai")
+	if first == nil {
+		t.Fatalf("Asia/Shanghai 应能加载")
+	}
+	if second := tzLocation("Asia/Shanghai"); second != first {
+		t.Fatalf("同名应命中缓存返回同一指针")
+	}
+	if tzLocation("") != nil {
+		t.Fatalf("空名应回 nil（未配置语义）")
+	}
+	if tzLocation("Not/AZone") != nil {
+		t.Fatalf("坏名应回 nil（加载失败语义）")
+	}
+	if got := tzLocation("UTC"); got != time.UTC {
+		t.Fatalf("UTC 应等于 time.UTC，实得 %v", got)
+	}
+}
+
 func TestResolverReturnsBothHalves(t *testing.T) {
 	t.Parallel()
 

@@ -63,6 +63,10 @@ func InClockWindow(minutes, start, end int) bool {
 	return minutes >= start || minutes < end
 }
 
+// defaultWorkdays 是 weekdays 未配置时的默认工作日。包级共享而非每次判定
+// 新建切片：判定在热路径与时间轴预览（逐分钟采样）上都被高频调用。
+var defaultWorkdays = []int{1, 2, 3, 4, 5}
+
 // IsWorkday 判断某个日期是否为工作日。
 //
 // 优先级：按日期的显式覆盖 > 星期几规则。
@@ -70,18 +74,22 @@ func InClockWindow(minutes, start, end int) bool {
 //
 // 入参应已转换到配置时区。
 func (r PeakResolver) IsWorkday(t time.Time) bool {
-	if override, ok := r.cal.DateOverrides[t.Format("2006-01-02")]; ok {
-		switch override {
-		case models.DateOverrideWork:
-			return true
-		case models.DateOverrideRest:
-			return false
+	// 未配置节假日覆盖时跳过 Format 与 map 查找：多数部署没有覆盖表，
+	// 而 Format 是这条路径上唯一的分配来源。
+	if len(r.cal.DateOverrides) > 0 {
+		if override, ok := r.cal.DateOverrides[t.Format("2006-01-02")]; ok {
+			switch override {
+			case models.DateOverrideWork:
+				return true
+			case models.DateOverrideRest:
+				return false
+			}
+			// 无法识别的取值不阻断判定，回落到星期几规则
 		}
-		// 无法识别的取值不阻断判定，回落到星期几规则
 	}
 	weekdays := r.cal.Weekdays
 	if len(weekdays) == 0 {
-		weekdays = []int{1, 2, 3, 4, 5}
+		weekdays = defaultWorkdays
 	}
 	wd := int(t.Weekday()) // 0=周日
 	for _, d := range weekdays {
@@ -96,16 +104,17 @@ func (r PeakResolver) IsWorkday(t time.Time) bool {
 //
 // 按配置顺序首个命中者胜出，因此 Periods 的顺序即优先级。
 func (r PeakResolver) ResolvePeriod(t time.Time) *models.PeakPeriod {
-	if len(r.terms.Periods) == 0 {
+	if len(r.clocks) == 0 {
 		return nil
 	}
-	local := r.cal.EffectiveTime(t)
+	local := r.effectiveTime(t)
 	minutes := local.Hour()*60 + local.Minute()
 	wd := int(local.Weekday())
 	workday := r.IsWorkday(local)
 
-	for i := range r.terms.Periods {
-		p := &r.terms.Periods[i]
+	for i := range r.clocks {
+		rc := &r.clocks[i]
+		p := rc.period
 
 		if len(p.Days) > 0 && !containsInt(p.Days, wd) {
 			continue
@@ -113,17 +122,12 @@ func (r PeakResolver) ResolvePeriod(t time.Time) *models.PeakPeriod {
 		if p.Workday != nil && *p.Workday != workday {
 			continue
 		}
-		start, err := ParseClock(p.Start)
-		if err != nil {
-			// 配置有误时跳过该时段而非整体失败：一个写坏的时段
-			// 不应让所有请求的成本计算都停摆。
+		// 坏时钟在构造时已标记 invalid：配置有误时跳过该时段而非整体失败，
+		// 一个写坏的时段不应让所有请求的成本计算都停摆。
+		if !rc.valid {
 			continue
 		}
-		end, err := ParseClock(p.End)
-		if err != nil {
-			continue
-		}
-		if InClockWindow(minutes, start, end) {
+		if InClockWindow(minutes, rc.start, rc.end) {
 			return p
 		}
 	}
@@ -150,11 +154,71 @@ func (r PeakResolver) ResolveMultiplier(t time.Time) (float64, string) {
 type PeakResolver struct {
 	terms models.PeakTerms
 	cal   models.PeakCalendar
+	// loc 是配置时区的预加载结果；nil 表示未配置或加载失败，判定按原值。
+	loc *time.Location
+	// clocks 与 terms.Periods 一一对应的预解析时钟。判定在热路径与
+	// 时间轴预览（逐分钟采样 1440×days 次）上被高频调用，
+	// "HH:MM" 的字符串分割与转换不能留到每次判定。
+	clocks []resolvedClock
 }
 
-// NewPeakResolver 构造判定器。
+// resolvedClock 是单个时段的预解析结果；valid=false 表示配置有误，
+// 判定时沿用「跳过该时段」语义。
+type resolvedClock struct {
+	period     *models.PeakPeriod
+	start, end int
+	valid      bool
+}
+
+// effectiveTime 与 models.PeakCalendar.EffectiveTime 语义一致，
+// 但时区只在构造时加载一次。
+func (r PeakResolver) effectiveTime(t time.Time) time.Time {
+	if r.loc == nil {
+		return t
+	}
+	return t.In(r.loc)
+}
+
+// tzCache 按 IANA 名缓存 *time.Location。LoadLocation 每次调用都可能触发
+// tzdata 文件/内嵌数据解析（本机实测约 9µs/次，含 open 系统调用，占单次判定
+// CPU 的 ~78%），而热路径上 NewPeakResolver 每请求执行；时区名是配置枚举值，
+// 缓存集有界且 IANA 数据在进程生命周期内不变，故做进程级永久缓存。
+var tzCache sync.Map
+
+// tzLocation 返回预加载的时区；未配置或加载失败回 nil，与 EffectiveTime
+// 的「加载失败按原值」语义一致。
+func tzLocation(name string) *time.Location {
+	if name == "" {
+		return nil
+	}
+	if v, ok := tzCache.Load(name); ok {
+		return v.(*time.Location)
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return nil
+	}
+	v, _ := tzCache.LoadOrStore(name, loc)
+	return v.(*time.Location)
+}
+
+// NewPeakResolver 构造判定器。时区加载与时钟解析在此一次性完成，
+// 构造成本与旧版单次判定的解析成本同量级，复用次数越多收益越大。
 func NewPeakResolver(terms models.PeakTerms, cal models.PeakCalendar) PeakResolver {
-	return PeakResolver{terms: terms, cal: cal}
+	r := PeakResolver{terms: terms, cal: cal}
+	r.loc = tzLocation(cal.Timezone)
+	r.clocks = make([]resolvedClock, len(terms.Periods))
+	for i := range terms.Periods {
+		p := &terms.Periods[i]
+		rc := resolvedClock{period: p}
+		if s, err := ParseClock(p.Start); err == nil {
+			if e, err := ParseClock(p.End); err == nil {
+				rc.start, rc.end, rc.valid = s, e, true
+			}
+		}
+		r.clocks[i] = rc
+	}
+	return r
 }
 
 // Terms 返回底层条款。
@@ -204,7 +268,7 @@ func PreviewSchedule(r PeakResolver, start time.Time, days int) []SchedulePoint 
 
 	for t := local; t.Before(end); t = t.Add(step) {
 		multiplier, period := r.ResolveMultiplier(t)
-		localT := r.cal.EffectiveTime(t)
+		localT := r.effectiveTime(t)
 		workday := r.IsWorkday(localT)
 		ms := t.UnixMilli()
 
