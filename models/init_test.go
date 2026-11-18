@@ -126,6 +126,101 @@ func TestInit_BackfillsChatLogBackupToFalse(t *testing.T) {
 	}
 }
 
+// chat_logs 的两条兼容回填只该在升级时跑一次：升级完成的库上它们永远命中
+// 0 行，却每次启动都要付两遍全表扫描。这条测试钉住三件事：有 NULL 行时回填
+// 生效、完成后标记落库、标记在时二次启动整段跳过。
+func TestInitChatLogsBackfillRunsOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "backfill-gate.db")
+
+	// 老库形态：chat_logs 有 auth_key_id 列但没有 backup 列（AutoMigrate 补列后
+	// 存量行全为 NULL，正是要回填的对象）
+	db, err := gorm.Open(sqlite.Open(path), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("failed to open seed database: %v", err)
+	}
+	closeOnCleanup(t, db)
+
+	if err := db.Exec(`
+		CREATE TABLE chat_logs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME,
+			updated_at DATETIME,
+			deleted_at DATETIME,
+			name TEXT,
+			trace_id TEXT,
+			provider_model TEXT,
+			provider_name TEXT,
+			status TEXT,
+			style TEXT,
+			chat_io NUMERIC,
+			auth_key_id INTEGER
+		)
+	`).Error; err != nil {
+		t.Fatalf("failed to create legacy chat_logs table: %v", err)
+	}
+	if err := db.Exec(`INSERT INTO chat_logs (name, provider_name, status, auth_key_id) VALUES
+		('log-null', 'prov', 'success', NULL),
+		('log-user', 'prov', 'error', 7)`).Error; err != nil {
+		t.Fatalf("failed to seed legacy chat logs: %v", err)
+	}
+	if sqlDB, err := db.DB(); err == nil {
+		_ = sqlDB.Close()
+	}
+
+	Init(context.Background(), path)
+	closeOnCleanup(t, DB)
+
+	t.Run("NULL 行被回填且用户填过的值不动", func(t *testing.T) {
+		if got := chatLogsNullRows(t, "auth_key_id"); got != 0 {
+			t.Fatalf("auth_key_id 的 NULL 应被回填干净，实剩 %d 行", got)
+		}
+		if got := chatLogsNullRows(t, "backup"); got != 0 {
+			t.Fatalf("backup 的 NULL 应被回填干净，实剩 %d 行", got)
+		}
+		var n int64
+		if err := DB.Raw(`SELECT COUNT(*) FROM chat_logs WHERE name = 'log-user' AND auth_key_id = 7`).Scan(&n).Error; err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		if n != 1 {
+			t.Fatal("用户填过的 auth_key_id 被回填覆盖了")
+		}
+	})
+
+	t.Run("完成标记落库", func(t *testing.T) {
+		if got := countRowsWhere(t, "configs", "key = ?", KeyChatLogsBackfillState); got != 1 {
+			t.Fatalf("回填完成标记应有且只有 1 行，实得 %d 行", got)
+		}
+	})
+
+	// 再来一次启动。标记在，回填必须整段跳过：故意把一行改回 NULL，
+	// 二次启动后它应原样留着——这就是"跳过"的直接证据。
+	if err := DB.Exec(`UPDATE chat_logs SET auth_key_id = NULL WHERE name = 'log-null'`).Error; err != nil {
+		t.Fatalf("造二次启动前的 NULL 行失败：%v", err)
+	}
+	closeCurrentDB(t)
+	Init(context.Background(), path)
+
+	t.Run("二次启动跳过回填", func(t *testing.T) {
+		if got := chatLogsNullRows(t, "auth_key_id"); got != 1 {
+			t.Fatalf("标记已存在，回填不该再跑：实剩 %d 行 NULL，want 1", got)
+		}
+		if got := countRowsWhere(t, "configs", "key = ?", KeyChatLogsBackfillState); got != 1 {
+			t.Fatalf("标记应仍只有 1 行，实得 %d 行", got)
+		}
+	})
+}
+
+// chatLogsNullRows 数 chat_logs 上某列为 NULL 的行数。用原生 SQL：NULL 的
+// uint/bool 扫进结构体会直接报错。
+func chatLogsNullRows(t *testing.T, col string) int64 {
+	t.Helper()
+	var n int64
+	if err := DB.Raw("SELECT COUNT(*) FROM chat_logs WHERE " + col + " IS NULL").Scan(&n).Error; err != nil {
+		t.Fatalf("数 %s 的 NULL 失败：%v", col, err)
+	}
+	return n
+}
+
 // model_with_providers.backup 同理：NULL 的备用标记在调度分池里读不出来。
 func TestInit_BackfillsModelWithProviderBackupToFalse(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "llmio.db")

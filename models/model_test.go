@@ -2,6 +2,7 @@ package models
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/glebarez/sqlite"
@@ -48,6 +49,18 @@ func TestChatLogIndexes(t *testing.T) {
 		}
 	}
 
+	// name / status / auth_key_id 不再建单列索引：它们是三个复合索引的最左前缀，
+	// 单列等值查询走前缀完全等价，多建一条只是双倍的写入期维护成本。
+	for _, name := range []string{
+		"idx_chat_logs_name",
+		"idx_chat_logs_status",
+		"idx_chat_logs_auth_key_id",
+	} {
+		if got[name] {
+			t.Fatalf("新库上不该再建前缀冗余的单列索引 %s，实有：%v", name, names)
+		}
+	}
+
 	// 复合索引的列顺序决定它能否被 `WHERE 前导列 = ? AND created_at >= ?` 命中，
 	// 因此不仅要有，还要顺序正确。前导列必须是等值过滤的那个字段。
 	composites := map[string][]string{
@@ -86,4 +99,30 @@ func indexColumns(t *testing.T, db *gorm.DB, index string) []string {
 		cols = append(cols, r.Name)
 	}
 	return cols
+}
+
+// configs.key 的点查在热路径上：自愈策略在每个聊天请求的转发循环里读，
+// 调度器按周期读压缩/回收策略，启动期各处 ensure* 与回填门槛也都按它查。
+// 没索引时全是 configs 全表扫，且退化不报错、只变慢，所以用测试钉住。
+func TestConfigKeyIndex(t *testing.T) {
+	initModelAt(t, filepath.Join(t.TempDir(), "config-idx.db"))
+
+	if !indexExists(t, DB, "idx_configs_key") {
+		t.Fatal("configs.key 缺索引：热路径点查会全表扫")
+	}
+	if cols := indexColumns(t, DB, "idx_configs_key"); len(cols) != 1 || cols[0] != "key" {
+		t.Fatalf("idx_configs_key 应只含 key 一列，实得 %v", cols)
+	}
+
+	var plan []struct{ Detail string }
+	if err := DB.Raw(`EXPLAIN QUERY PLAN SELECT * FROM configs WHERE key = 'self_heal_policy'`).Scan(&plan).Error; err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN 失败：%v", err)
+	}
+	details := make([]string, 0, len(plan))
+	for _, p := range plan {
+		details = append(details, p.Detail)
+	}
+	if joined := strings.Join(details, " | "); !strings.Contains(joined, "idx_configs_key") {
+		t.Fatalf("key 点查没走 idx_configs_key：%s", joined)
+	}
 }

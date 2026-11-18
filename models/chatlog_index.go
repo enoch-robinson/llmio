@@ -38,3 +38,62 @@ const chatLogsDeletedAtIndex = "idx_chat_logs_deleted_at"
 func DropChatLogsDeletedAtIndex(ctx context.Context) error {
 	return DB.WithContext(ctx).Exec("DROP INDEX IF EXISTS " + chatLogsDeletedAtIndex).Error
 }
+
+// chatLogsPrefixRedundantColumns 是 chat_logs 上与复合索引最左前缀重复的列。
+//
+// 老版本的标签写成 `gorm:"index;index:idx_chat_logs_xxx_created,priority:1"`，
+// 同一列上会同时建出单列与复合两条索引。单列等值查询（如 WHERE name = ?）走
+// 复合索引的前缀与走单列索引完全等价，单列那条从此只是双倍的写入期维护成本。
+// 标签已从 ChatLog 上摘掉（见 model.go），AutoMigrate 不会再建新的；存量库上
+// GORM 按默认命名建出来的 idx_chat_logs_name / idx_chat_logs_status /
+// idx_chat_logs_auth_key_id 由下面的函数在启动时摘掉。
+var chatLogsPrefixRedundantColumns = map[string]bool{
+	"name":        true,
+	"status":      true,
+	"auth_key_id": true,
+}
+
+// DropChatLogsPrefixRedundantIndexes 摘掉 chat_logs 上前缀冗余的单列索引。可重复调用。
+//
+// 按**列构成**检测而不是按名字：要删的就是"只含 name / status / auth_key_id
+// 一列的普通二级索引"，idx_chat_logs_name 这些默认名只是 GORM 的命名产物，
+// 以库里实际检测到的为准。这样即使某个库上的同名索引被重建过（列构成没变），
+// 也照样能被识别；反之，列构成对不上的同名索引绝不动。
+//
+// 只删同时满足这三条的索引：
+//   - origin = 'c'（CREATE INDEX 建的；'u'/'pk' 是约束自带的，碰都不碰）；
+//   - unique = 0（唯一索引牵扯约束语义，不是性能问题，绝不动）；
+//   - index_info 恰好一列、且列在冗余清单里（三个复合索引各两列，天然不匹配）。
+//
+// 时序前提与 DropChatLogsDeletedAtIndex 相同：调用点在 Init 里、监听端口之前，
+// 此刻没有在途请求。DROP INDEX 只改 B 树指针，对大表是瞬时操作。
+func DropChatLogsPrefixRedundantIndexes(ctx context.Context) error {
+	var indexes []struct {
+		Name   string
+		Unique int
+		Origin string
+	}
+	if err := DB.WithContext(ctx).Raw("PRAGMA index_list('chat_logs')").Scan(&indexes).Error; err != nil {
+		return err
+	}
+
+	var drop []string
+	for _, idx := range indexes {
+		if idx.Origin != "c" || idx.Unique != 0 {
+			continue
+		}
+		var cols []struct{ Name string }
+		if err := DB.WithContext(ctx).Raw("PRAGMA index_info(\"" + idx.Name + "\")").Scan(&cols).Error; err != nil {
+			return err
+		}
+		if len(cols) == 1 && chatLogsPrefixRedundantColumns[cols[0].Name] {
+			drop = append(drop, idx.Name)
+		}
+	}
+	for _, name := range drop {
+		if err := DB.WithContext(ctx).Exec("DROP INDEX IF EXISTS \"" + name + "\"").Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}

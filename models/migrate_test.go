@@ -201,8 +201,9 @@ func TestInit_UpgradesLegacySchemaInPlace(t *testing.T) {
 			"chat_logs":            3,
 			"chat_ios":             2,
 			// configs 是**唯一一张启动期会被追加行的表**：几处 ensure*Config
-			// 会为缺省的策略补一行。历史那两行原样不动，这里数的是总数。
-			"configs":             3,
+			// 会为缺省的策略补一行，chat_logs 兼容回填完成后也会落一个完成标记。
+			// 历史那两行原样不动，这里数的是总数。
+			"configs":             4,
 			"log_cleanup_records": 1,
 		}
 		names := make([]string, 0, len(want))
@@ -272,7 +273,7 @@ func TestInit_UpgradesLegacySchemaInPlace(t *testing.T) {
 	})
 
 	t.Run("老库升级时补上自动填写策略，且只补一条", func(t *testing.T) {
-		// 上面那条 "configs 应有 3 行" 数的就是"两行历史 + 这一行"。
+		// 上面那条 "configs 应有 4 行" 数的就是"两行历史 + 自动填写策略 + 回填标记"。
 		// 这里把它的来历钉住：补的是**没配过的**那条，值取默认。
 		if got := countRowsWhere(t, "configs", "key = ?", KeyModelAutofillPolicy); got != 1 {
 			t.Fatalf("自动填写策略应有且只有 1 条，实得 %d 条", got)
@@ -387,14 +388,11 @@ func TestInit_UpgradesLegacySchemaInPlace(t *testing.T) {
 		// （分析页取数因此从索引范围扫描退化成全表扫），升级时**有意摘掉**，
 		// 见 DropChatLogsDeletedAtIndex。
 		for _, idx := range []string{
-			"idx_chat_logs_name",
-			"idx_chat_logs_status",
 			"idx_chat_logs_trace_id",
 			"idx_chat_logs_provider_model",
 			"idx_chat_logs_provider_name",
 			"idx_chat_logs_user_agent",
 			"idx_chat_logs_session_id",
-			"idx_chat_logs_auth_key_id",
 		} {
 			if !indexExists(t, DB, idx) {
 				t.Fatalf("升级后上游索引 %s 不见了", idx)
@@ -402,6 +400,19 @@ func TestInit_UpgradesLegacySchemaInPlace(t *testing.T) {
 		}
 		if indexExists(t, DB, "idx_chat_logs_deleted_at") {
 			t.Fatal("升级后 idx_chat_logs_deleted_at 还在：它会把分析页取数逼成全表扫描")
+		}
+		// name / status / auth_key_id 这三条单列与 deleted_at 同一批摘掉，但理由
+		// 不同：升级建出复合索引之后，它们成了最左前缀的重复品——单列等值查询
+		// 复合索引完全覆盖，留着只是双倍的写入期维护成本。见
+		// DropChatLogsPrefixRedundantIndexes。
+		for _, idx := range []string{
+			"idx_chat_logs_name",
+			"idx_chat_logs_status",
+			"idx_chat_logs_auth_key_id",
+		} {
+			if indexExists(t, DB, idx) {
+				t.Fatalf("升级后前缀冗余单列索引 %s 还在（复合索引已覆盖它）", idx)
+			}
 		}
 		// 新索引不能只对名字：GORM 会用同一个名字建出**只有前导列**的索引
 		// （丢掉 created_at 的标签就会这样），而那种索引对 `created_at >= ?`

@@ -4,7 +4,10 @@ import "gorm.io/gorm"
 
 type Config struct {
 	gorm.Model
-	Key   string // 配置类型
+	// Key 配置类型。等值查找在热路径上：自愈策略在每个聊天请求的转发循环里读，
+	// 调度器按周期读压缩/回收策略，启动期各处 ensure* 与回填门槛也都按它查。
+	// 没有索引时这些点查全是 configs 全表扫，所以带索引。
+	Key   string `gorm:"index"`
 	Value string // 配置内容
 }
 
@@ -31,6 +34,11 @@ const (
 	// KeySelfHealPolicy 是"上游拒收请求体参数时的同家删参重试"策略。
 	// 见 SelfHealPolicy。
 	KeySelfHealPolicy = "self_heal_policy"
+	// KeyChatLogsBackfillState 标记 chat_logs 的两条兼容回填（auth_key_id /
+	// backup 补默认值）已经做完。它们只对"加列前的存量行"有意义，升级完成后
+	// 每次启动再跑就是两场白扫的全表 UPDATE；chat_logs 是最大的表，标记让
+	// 升级后的启动不再付这笔钱。见 init.go 的回填门槛。
+	KeyChatLogsBackfillState = "chat_logs_backfill_state"
 )
 
 type AnthropicCountTokens struct {

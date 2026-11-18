@@ -75,7 +75,7 @@ type ModelWithProvider struct {
 // 因此对外仍以 ID、CreatedAt、DeletedAt 访问，JSON 形态不变。
 //
 // 索引按聚合的实际查询形态设计：
-//   - created_at 单列：范围过滤 + ORDER BY
+//   - created_at 单列：范围过滤 + ORDER BY（三个复合索引里它是第二列，单列标签必须留住）
 //   - status, created_at：趋势与成功率
 //   - auth_key_id, created_at：按 Key 下钻
 //   - name, created_at：按模型下钻
@@ -90,11 +90,15 @@ type ChatLog struct {
 	// 存量库上的旧索引由 DropChatLogsDeletedAtIndex 在启动时摘掉。
 	DeletedAt gorm.DeletedAt
 
-	Name          string `gorm:"index;index:idx_chat_logs_name_created,priority:1"`
+	// Name / Status / AuthKeyID 不再带单列 index 标签：它们分别是下面三个复合
+	// 索引的最左前缀，`WHERE name = ?` 这类单列等值查询复合索引完全覆盖
+	// （还能顺带吃到 created_at 的顺序）。存量库上的旧单列索引由
+	// DropChatLogsPrefixRedundantIndexes 在启动时摘掉。
+	Name          string `gorm:"index:idx_chat_logs_name_created,priority:1"`
 	TraceID       string `gorm:"index"`
 	ProviderModel string `gorm:"index"`
 	ProviderName  string `gorm:"index"`
-	Status        string `gorm:"index;index:idx_chat_logs_status_created,priority:1"` // error or success
+	Status        string `gorm:"index:idx_chat_logs_status_created,priority:1"` // error or success
 	Style         string // 类型（客户端协议）
 	// UpstreamStyle 实际使用的上游协议。直连时与 Style 相同；不同即说明这次转发经过了
 	// 一层协议翻译（见 service/bridge.go）。
@@ -104,8 +108,8 @@ type ChatLog struct {
 	BridgeNotes string `json:"bridge_notes,omitempty"`
 	UserAgent   string `gorm:"index"` // 用户代理
 	RemoteIP    string // 访问ip
-	AuthKeyID   uint   `gorm:"index;index:idx_chat_logs_key_created,priority:1"` // 使用的AuthKey ID
-	SessionID   string `gorm:"index"`                                            // 请求体中的session_id
+	AuthKeyID   uint   `gorm:"index:idx_chat_logs_key_created,priority:1"` // 使用的AuthKey ID
+	SessionID   string `gorm:"index"`                                      // 请求体中的session_id
 	ChatIO      bool   // 是否开启IO记录
 	// Backup 本次响应由备用关联提供：主关联在本请求内全部失败出局后降级接管。
 	// 非指针 bool 是后加列，AutoMigrate 不给存量行填默认值，NULL 由 init.go 回填 false。

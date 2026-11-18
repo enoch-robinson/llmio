@@ -90,13 +90,27 @@ func Init(ctx context.Context, path string) {
 	if _, err := gorm.G[AuthKey](DB).Where("io_log IS NULL").Update(ctx, "io_log", false); err != nil {
 		panic(err)
 	}
-	if _, err := gorm.G[ChatLog](DB).Where("auth_key_id IS NULL").Update(ctx, "auth_key_id", 0); err != nil {
+	// chat_logs 的两条兼容回填（下面）只对"加列前的存量行"有意义，做一次就
+	// 够了。以前每次启动都无条件全表扫两遍；chat_logs 是最大的表，升级完成后
+	// 这两条 UPDATE 永远命中 0 行，却照样付两遍扫描的钱。落一个完成标记：
+	// 标记在就整段跳过；标记只在两条 UPDATE 都成功后才写——panic-on-error，
+	// 失败的进程重启后会再试一遍，不会留下"半回填 + 有标记"的库。
+	done, err := chatLogsBackfillDone(ctx)
+	if err != nil {
 		panic(err)
 	}
-	// 备用标记是后加的非指针 bool：AutoMigrate 加列不会给存量行填默认值，
-	// 留 NULL 会导致日志列表扫描 bool 时报错（与 auth_key_id 同一类问题）
-	if _, err := gorm.G[ChatLog](DB).Where("backup IS NULL").Update(ctx, "backup", false); err != nil {
-		panic(err)
+	if !done {
+		if _, err := gorm.G[ChatLog](DB).Where("auth_key_id IS NULL").Update(ctx, "auth_key_id", 0); err != nil {
+			panic(err)
+		}
+		// 备用标记是后加的非指针 bool：AutoMigrate 加列不会给存量行填默认值，
+		// 留 NULL 会导致日志列表扫描 bool 时报错（与 auth_key_id 同一类问题）
+		if _, err := gorm.G[ChatLog](DB).Where("backup IS NULL").Update(ctx, "backup", false); err != nil {
+			panic(err)
+		}
+		if err := EnsureConfigIfMissing(ctx, KeyChatLogsBackfillState, true); err != nil {
+			panic(err)
+		}
 	}
 	if err := ensureLogCleanupPolicyConfig(ctx); err != nil {
 		panic(err)
@@ -130,6 +144,11 @@ func Init(ctx context.Context, path string) {
 	// 同样失败只记日志：摘不掉只是慢，不该让服务起不来。
 	if err := DropChatLogsDeletedAtIndex(ctx); err != nil {
 		slog.Error("chat_logs.deleted_at 索引没摘掉（分析页取数会退化为全表扫描）", "error", err)
+	}
+	// 同一个调用点：顺路摘掉三个前缀冗余的单列索引（复合索引已覆盖它们，
+	// 留着只是每次写入多付三份索引维护成本）。同样失败只记日志。
+	if err := DropChatLogsPrefixRedundantIndexes(ctx); err != nil {
+		slog.Error("chat_logs 前缀冗余单列索引没摘掉（写入期多付索引维护成本）", "error", err)
 	}
 
 	// `DB_VACUUM` 的启动期 VACUUM **搬去 service.PrepareStorage 了**（main 里、
@@ -302,6 +321,15 @@ func ensureModelDisplayOrder(ctx context.Context) error {
 		}
 		return nil
 	})
+}
+
+// chatLogsBackfillDone 读 chat_logs 兼容回填的完成标记。标记行在即视为已回填。
+func chatLogsBackfillDone(ctx context.Context) (bool, error) {
+	count, err := gorm.G[Config](DB).Where("key = ?", KeyChatLogsBackfillState).Count(ctx, "*")
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func ensureLogCleanupPolicyConfig(ctx context.Context) error {
