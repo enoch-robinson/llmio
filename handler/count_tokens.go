@@ -1,11 +1,14 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/atopos31/llmio/common"
 	"github.com/atopos31/llmio/models"
@@ -14,29 +17,90 @@ import (
 	"gorm.io/gorm"
 )
 
-func CountTokens(c *gin.Context) {
-	ctx := c.Request.Context()
+// countTokensConfigTTL 是 count_tokens 配置的缓存有效期。Claude Code 每次请求
+// 前都会先打一发 count_tokens，配置本身是管理端天级改一次的数据，短 TTL +
+// 写后失效（UpdateConfigByKey）比每请求查库划算。
+const countTokensConfigTTL = 30 * time.Second
+
+var (
+	countTokensMu    sync.RWMutex
+	countTokensCfg   models.AnthropicCountTokens
+	countTokensAt    time.Time
+	countTokensReady bool
+)
+
+// parseConfigError 区分「配置存在但解析坏了」与「查询失败」：两者都回 500，
+// 但操作员看到的提示不同。
+type parseConfigError struct{ err error }
+
+func (e *parseConfigError) Error() string { return e.err.Error() }
+func (e *parseConfigError) Unwrap() error { return e.err }
+
+// loadCountTokensConfig 读 count_tokens 配置（带短 TTL 缓存）。found=false 表示
+// 配置行不存在，调用方按 NotFound 响应；不存在的配置不入缓存，创建后立即可见。
+func loadCountTokensConfig(ctx context.Context) (models.AnthropicCountTokens, bool, error) {
+	countTokensMu.RLock()
+	if countTokensReady && time.Since(countTokensAt) < countTokensConfigTTL {
+		cfg := countTokensCfg
+		countTokensMu.RUnlock()
+		return cfg, true, nil
+	}
+	countTokensMu.RUnlock()
 
 	config, err := gorm.G[models.Config](models.DB).Where("key = ?", models.KeyAnthropicCountTokens).First(ctx)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			common.NotFound(c, "Anthropic count tokens config not found")
-			return
+			return models.AnthropicCountTokens{}, false, nil
 		}
-		common.InternalServerError(c, "Failed to retrieve Anthropic count tokens config: "+err.Error())
-		return
+		return models.AnthropicCountTokens{}, false, err
+	}
+	var cfg models.AnthropicCountTokens
+	if err := json.Unmarshal([]byte(config.Value), &cfg); err != nil {
+		return models.AnthropicCountTokens{}, false, &parseConfigError{err}
 	}
 
-	var anthropicConfig models.AnthropicCountTokens
-	if err := json.Unmarshal([]byte(config.Value), &anthropicConfig); err != nil {
-		common.InternalServerError(c, "Failed to parse Anthropic count tokens config: "+err.Error())
+	countTokensMu.Lock()
+	countTokensCfg = cfg
+	countTokensAt = time.Now()
+	countTokensReady = true
+	countTokensMu.Unlock()
+	return cfg, true, nil
+}
+
+// InvalidateCountTokensConfig 使 count_tokens 配置缓存失效，供配置写入后调用。
+func InvalidateCountTokensConfig() {
+	countTokensMu.Lock()
+	countTokensCfg = models.AnthropicCountTokens{}
+	countTokensAt = time.Time{}
+	countTokensReady = false
+	countTokensMu.Unlock()
+}
+
+// countTokensHTTPClient 带 30s 整体超时：响应是小 JSON，上游挂起时不能让请求
+// 与连接无限滞留（http.DefaultClient 没有任何超时）。
+var countTokensHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
+func CountTokens(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	config, found, err := loadCountTokensConfig(ctx)
+	if err != nil {
+		var perr *parseConfigError
+		if errors.As(err, &perr) {
+			common.InternalServerError(c, "Failed to parse Anthropic count tokens config: "+err.Error())
+		} else {
+			common.InternalServerError(c, "Failed to retrieve Anthropic count tokens config: "+err.Error())
+		}
 		return
 	}
-
+	if !found {
+		common.NotFound(c, "Anthropic count tokens config not found")
+		return
+	}
 	anthropic := providers.Anthropic{
-		BaseURL: anthropicConfig.BaseURL,
-		APIKey:  anthropicConfig.APIKey,
-		Version: anthropicConfig.Version,
+		BaseURL: config.BaseURL,
+		APIKey:  config.APIKey,
+		Version: config.Version,
 	}
 
 	req, err := anthropic.BuildCountTokensReq(ctx, c.Request.Header, c.Request.Body)
@@ -45,7 +109,7 @@ func CountTokens(c *gin.Context) {
 		return
 	}
 
-	res, err := http.DefaultClient.Do(req)
+	res, err := countTokensHTTPClient.Do(req)
 	if err != nil {
 		common.InternalServerError(c, "Failed to send request: "+err.Error())
 		return
@@ -85,26 +149,19 @@ type CountTokensResponse struct {
 func TestCountTokens(c *gin.Context) {
 	ctx := c.Request.Context()
 
-	config, err := gorm.G[models.Config](models.DB).Where("key = ?", models.KeyAnthropicCountTokens).First(ctx)
+	config, found, err := loadCountTokensConfig(ctx)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			common.NotFound(c, "Anthropic count tokens config not found")
-			return
-		}
 		common.InternalServerError(c, "Failed to retrieve Anthropic count tokens config: "+err.Error())
 		return
 	}
-
-	var anthropicConfig models.AnthropicCountTokens
-	if err := json.Unmarshal([]byte(config.Value), &anthropicConfig); err != nil {
-		common.InternalServerError(c, "Failed to parse Anthropic count tokens config: "+err.Error())
+	if !found {
+		common.NotFound(c, "Anthropic count tokens config not found")
 		return
 	}
-
 	anthropic := providers.Anthropic{
-		BaseURL: anthropicConfig.BaseURL,
-		APIKey:  anthropicConfig.APIKey,
-		Version: anthropicConfig.Version,
+		BaseURL: config.BaseURL,
+		APIKey:  config.APIKey,
+		Version: config.Version,
 	}
 
 	req, err := anthropic.BuildCountTokensReq(ctx, nil, strings.NewReader(testBody))
@@ -113,7 +170,7 @@ func TestCountTokens(c *gin.Context) {
 		return
 	}
 
-	res, err := http.DefaultClient.Do(req)
+	res, err := countTokensHTTPClient.Do(req)
 	if err != nil {
 		common.InternalServerError(c, "Failed to send request: "+err.Error())
 		return

@@ -1049,6 +1049,9 @@ func UpdateConfigByKey(c *gin.Context) {
 	if key == models.KeySelfHealPolicy {
 		service.InvalidateSelfHealPolicy()
 	}
+	if key == models.KeyAnthropicCountTokens {
+		InvalidateCountTokensConfig()
+	}
 
 	common.Success(c, map[string]string{
 		"key":   config.Key,
