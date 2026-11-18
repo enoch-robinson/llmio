@@ -40,6 +40,19 @@ const (
 	transientRetryBase = 150 * time.Millisecond
 )
 
+const (
+	// errorBodyLimit 闸住非 200 错误体的读取上限（进日志与自愈判定）。
+	errorBodyLimit = 1 << 20
+	// errorMatcherSampleLimit 是 ErrorMatcher 只采样的响应前缀长度。
+	errorMatcherSampleLimit = 64 << 10
+)
+
+// readCloser 把已读前缀与剩余流拼回转发通道，同时保留原 body 的 Close。
+type readCloser struct {
+	io.Reader
+	io.Closer
+}
+
 // sleepBackoff 是撞锁后的退避，可被 ctx 提前打断。
 func sleepBackoff(ctx context.Context, attempt int) {
 	d := transientRetryBase * time.Duration(attempt)
@@ -413,7 +426,9 @@ func BalanceChat(ctx context.Context, start time.Time, style string, before Befo
 					break
 				}
 
-				byteBody, rerr := io.ReadAll(res.Body)
+				// 非 200 错误体闸在 1MB：错误体只进日志与自愈判定，没有消费场景需要全量；
+				// 上游病态返回（GB 级 HTML 错误页）不应打爆内存与落库日志。
+				byteBody, rerr := io.ReadAll(io.LimitReader(res.Body, errorBodyLimit))
 				res.Body.Close()
 				// 非 200 的每一次尝试到此终结——自愈重发或换下一家都会新开 attempt,
 				// 释放本次按请求包装的 context
@@ -474,24 +489,31 @@ func BalanceChat(ctx context.Context, start time.Time, style string, before Befo
 				contentType := strings.ToLower(res.Header.Get("Content-Type"))
 				// 流式正常返回通常是 text/event-stream，不提前消费响应体避免影响转发。
 				if !strings.Contains(contentType, "text/event-stream") {
-					byteBody, err := io.ReadAll(res.Body)
-					if err != nil {
-						fail(fmt.Errorf("read body failed: %w", err))
+					// 只采样前 64KB 判定：错误样本（quota exceeded 等）总在响应开头，
+					// 全量读入会把大响应整体拉进内存再复制一份字符串。
+					head, rerr := io.ReadAll(io.LimitReader(res.Body, errorMatcherSampleLimit))
+					if rerr != nil {
+						fail(fmt.Errorf("read body failed: %w", rerr))
 						balancer.Delete(id)
 						res.Body.Close()
 						cancelAttempt(nil)
 						continue
 					}
 
-					if matched, sample := matchProviderBodyError(string(byteBody), provider.ErrorMatcher); matched {
-						fail(fmt.Errorf("response matched provider error sample %q, body: %s", sample, string(byteBody)))
+					if matched, sample := matchProviderBodyError(string(head), provider.ErrorMatcher); matched {
+						fail(fmt.Errorf("response matched provider error sample %q, body: %s", sample, string(head)))
 						balancer.Delete(id)
 						res.Body.Close()
 						cancelAttempt(nil)
 						continue
 					}
 
-					res.Body = io.NopCloser(bytes.NewReader(byteBody))
+					// 未命中：已读前缀与剩余流拼回无损转发；Close 转发给原 body，
+					// 否则读过的连接既不复用也不释放（旧实现丢在这里的 NopCloser 正是这个坑）
+					res.Body = readCloser{
+						Reader: io.MultiReader(bytes.NewReader(head), res.Body),
+						Closer: res.Body,
+					}
 				}
 			}
 
