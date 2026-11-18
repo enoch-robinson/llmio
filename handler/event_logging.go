@@ -1,10 +1,20 @@
 package handler
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/atopos31/llmio/common"
 	"github.com/gin-gonic/gin"
+)
+
+// event_logging 是 Claude Code 遥测的接收端：批次进来只回个计数，内容本身
+// 被丢弃。它注册在鉴权之外，两个上限防的是同一件事——被塞进超大 body 或
+// 超长数组，白白解码一轮再整包扔掉。
+const (
+	maxEventLoggingBodyBytes = 1 << 20
+	maxEventLoggingEvents    = 1000
 )
 
 type EventLoggingRequest struct {
@@ -50,13 +60,25 @@ type EventLoggingEnv struct {
 }
 
 func EventLogging(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxEventLoggingBodyBytes)
 	var req EventLoggingRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			common.ErrorWithHttpStatus(c, http.StatusRequestEntityTooLarge, http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("request body too large (max %d bytes)", maxEventLoggingBodyBytes))
+			return
+		}
 		common.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
+	rejected := 0
+	if len(req.Events) > maxEventLoggingEvents {
+		rejected = len(req.Events) - maxEventLoggingEvents
+		req.Events = req.Events[:maxEventLoggingEvents]
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"accepted_count": len(req.Events),
-		"rejected_count": 0,
+		"rejected_count": rejected,
 	})
 }

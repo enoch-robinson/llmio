@@ -72,10 +72,21 @@ func GeminiGenerateContentHandler(c *gin.Context) {
 	chatHandler(c, service.NewBeforerGemini(model, stream), service.ProcesserGemini, consts.StyleGemini)
 }
 
+// maxChatBodyBytes 限制聊天请求体大小：请求体会被完整物化且内存随并发线性
+// 放大，不能无界。测试会调小以覆盖超限路径。
+var maxChatBodyBytes = int64(32 << 20)
+
 func chatHandler(c *gin.Context, preProcessor service.Beforer, postProcessor service.Processer, style string) {
 	// 读取原始请求体
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxChatBodyBytes)
 	reqBody, err := io.ReadAll(c.Request.Body)
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			common.ErrorWithHttpStatus(c, http.StatusRequestEntityTooLarge, http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("request body too large (max %d bytes)", maxChatBodyBytes))
+			return
+		}
 		common.InternalServerError(c, err.Error())
 		return
 	}
