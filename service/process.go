@@ -2,12 +2,12 @@ package service
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"iter"
-	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +18,22 @@ import (
 const (
 	InitScannerBufferSize = 1024 * 8         // 8KB
 	MaxScannerBufferSize  = 1024 * 1024 * 64 // 64MB
+)
+
+// SSE 帧前缀与结束标记。流式响应的每个 chunk 都要比一遍，用 []byte 常量免掉
+// 每行的字符串分配。
+var (
+	sseDataPrefix  = []byte("data: ")
+	sseEventPrefix = []byte("event: ")
+	sseEventColon  = []byte("event:")
+	sseJSONObject  = []byte("{")
+	sseJSONArray   = []byte("[")
+	sseDoneFrame   = []byte("[DONE]")
+
+	// 子串预筛用的键名。见 ProcesserOpenAI 里的说明。
+	sseErrorKey     = []byte(`"error"`)
+	sseUsageKey     = []byte(`"usage"`)
+	sseUsageMetaKey = []byte(`"usageMetadata"`)
 )
 
 // Processer 从响应流解析日志行与 token 用量；keepOutput=false（ioLog 关闭）时
@@ -42,29 +58,38 @@ func ProcesserOpenAI(ctx context.Context, pr io.Reader, stream bool, start time.
 		})
 		if !stream {
 			if keepOutput {
-				output.OfString = chunk
+				output.OfString = string(chunk)
 			}
-			usageStr = gjson.Get(chunk, "usage").String()
+			usageStr = gjson.GetBytes(chunk, "usage").String()
 			break
 		}
-		chunk = strings.TrimPrefix(chunk, "data: ")
-		if chunk == "[DONE]" {
+		chunk = bytes.TrimPrefix(chunk, sseDataPrefix)
+		if bytes.Equal(chunk, sseDoneFrame) {
 			break
 		}
+		// 每个 chunk 都要问两件事：有没有 error、有没有 usage。gjson 每次都要从头
+		// 扫一遍整个对象（180 字节的 chunk 实测 ~114 ns/次），而绝大多数 chunk 两个
+		// 键都没有——白白扫两遍。先用 bytes.Contains 做子串预筛，命中才解析：
+		// 键在 JSON 里一定以 "error" / "usage" 的形式出现，所以不会漏；值里恰好
+		// 出现这两个词只会多一次无害的扫描。
+		//
 		// 流式过程中错误
-		errStr := gjson.Get(chunk, "error")
-		if errStr.Exists() {
-			return nil, nil, errors.New(errStr.String())
+		if bytes.Contains(chunk, sseErrorKey) {
+			if errStr := gjson.GetBytes(chunk, "error"); errStr.Exists() {
+				return nil, nil, errors.New(errStr.String())
+			}
 		}
 		if keepOutput {
-			output.OfStringArray = append(output.OfStringArray, chunk)
+			output.OfStringArray = append(output.OfStringArray, string(chunk))
 		}
 
 		// OpenAI reports a final snapshot; compatible providers may repeat cumulative
 		// snapshots. Keep the latest explicit total, including zero, and ignore null.
-		usage := gjson.Get(chunk, "usage")
-		if usage.IsObject() && usage.Get("total_tokens").Exists() {
-			usageStr = usage.String()
+		if bytes.Contains(chunk, sseUsageKey) {
+			usage := gjson.GetBytes(chunk, "usage")
+			if usage.IsObject() && usage.Get("total_tokens").Exists() {
+				usageStr = usage.String()
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -129,25 +154,25 @@ func ProcesserOpenAiRes(ctx context.Context, pr io.Reader, stream bool, start ti
 		})
 		if !stream {
 			if keepOutput {
-				output.OfString = chunk
+				output.OfString = string(chunk)
 			}
-			usageStr = gjson.Get(chunk, "usage").String()
+			usageStr = gjson.GetBytes(chunk, "usage").String()
 			break
 		}
 
-		if after, ok := strings.CutPrefix(chunk, "event: "); ok {
-			event = after
+		if after, ok := bytes.CutPrefix(chunk, sseEventPrefix); ok {
+			event = string(after)
 			continue
 		}
-		content := strings.TrimPrefix(chunk, "data: ")
-		if content == "" {
+		content := bytes.TrimPrefix(chunk, sseDataPrefix)
+		if len(content) == 0 {
 			continue
 		}
 		if keepOutput {
-			output.OfStringArray = append(output.OfStringArray, content)
+			output.OfStringArray = append(output.OfStringArray, string(content))
 		}
 		if event == "response.completed" {
-			usageStr = gjson.Get(content, "response.usage").String()
+			usageStr = gjson.GetBytes(content, "response.usage").String()
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -201,30 +226,30 @@ func ProcesserAnthropic(ctx context.Context, pr io.Reader, stream bool, start ti
 		})
 		if !stream {
 			if keepOutput {
-				output.OfString = chunk
+				output.OfString = string(chunk)
 			}
-			usageStr = gjson.Get(chunk, "usage").String()
+			usageStr = gjson.GetBytes(chunk, "usage").String()
 			break
 		}
 
-		if after, ok := strings.CutPrefix(chunk, "event: "); ok {
-			event = after
+		if after, ok := bytes.CutPrefix(chunk, sseEventPrefix); ok {
+			event = string(after)
 			continue
 		}
 
-		after, ok := strings.CutPrefix(chunk, "data: ")
+		after, ok := bytes.CutPrefix(chunk, sseDataPrefix)
 		if !ok {
 			continue
 		}
 
 		if keepOutput {
-			output.OfStringArray = append(output.OfStringArray, after)
+			output.OfStringArray = append(output.OfStringArray, string(after))
 		}
 		switch event {
 		case "message_start":
-			usageStr = gjson.Get(after, "message.usage").String()
+			usageStr = gjson.GetBytes(after, "message.usage").String()
 		case "message_delta":
-			usageStr = gjson.Get(after, "usage").String()
+			usageStr = gjson.GetBytes(after, "usage").String()
 		default:
 			continue
 		}
@@ -300,37 +325,40 @@ func ProcesserGemini(ctx context.Context, pr io.Reader, stream bool, start time.
 				firstChunkTime = time.Since(start)
 			})
 
-			if strings.HasPrefix(chunk, "event:") {
+			if bytes.HasPrefix(chunk, sseEventColon) {
 				continue
 			}
 
-			payload := ""
-			if after, ok := strings.CutPrefix(chunk, "data: "); ok {
+			var payload []byte
+			if after, ok := bytes.CutPrefix(chunk, sseDataPrefix); ok {
 				payload = after
-			} else if strings.HasPrefix(chunk, "{") || strings.HasPrefix(chunk, "[") {
+			} else if bytes.HasPrefix(chunk, sseJSONObject) || bytes.HasPrefix(chunk, sseJSONArray) {
 				payload = chunk
 			} else {
 				continue
 			}
-			if payload == "" {
+			if len(payload) == 0 {
 				continue
 			}
-			if payload == "[DONE]" {
+			if bytes.Equal(payload, sseDoneFrame) {
 				break
 			}
 
 			// 流式过程中错误
-			errStr := gjson.Get(payload, "error")
-			if errStr.Exists() {
-				return nil, nil, errors.New(errStr.String())
+			if bytes.Contains(payload, sseErrorKey) {
+				if errStr := gjson.GetBytes(payload, "error"); errStr.Exists() {
+					return nil, nil, errors.New(errStr.String())
+				}
 			}
 
 			if keepOutput {
-				output.OfStringArray = append(output.OfStringArray, payload)
+				output.OfStringArray = append(output.OfStringArray, string(payload))
 			}
-			usageMetadata := gjson.Get(payload, "usageMetadata")
-			if usageMetadata.Exists() && usageMetadata.Get("totalTokenCount").Int() != 0 {
-				usageStr = usageMetadata.String()
+			if bytes.Contains(payload, sseUsageMetaKey) {
+				usageMetadata := gjson.GetBytes(payload, "usageMetadata")
+				if usageMetadata.Exists() && usageMetadata.Get("totalTokenCount").Int() != 0 {
+					usageStr = usageMetadata.String()
+				}
 			}
 		}
 		if err := scanner.Err(); err != nil {
@@ -360,14 +388,20 @@ func ProcesserGemini(ctx context.Context, pr io.Reader, stream bool, start time.
 	}, &output, nil
 }
 
-func ScannerToken(reader *bufio.Scanner) iter.Seq2[string, int] {
-	return func(yield func(string, int) bool) {
+// ScannerToken 逐行给出扫描结果与**该行在缓冲区里的字节数**。
+//
+// 它返回 []byte 而不是 string：bufio.Scanner.Text() 会为每一行复制一份字符串，
+// 而流式响应一个 chunk 就是一行——2000 个 chunk 的响应因此多出 2000 次分配
+// （实测 ~1 alloc/chunk）。代价是**返回值只在下一次 Scan 之前有效**：需要留存
+// 的地方必须自己转成 string（见各 Processer 里的 append）。
+func ScannerToken(reader *bufio.Scanner) iter.Seq2[[]byte, int] {
+	return func(yield func([]byte, int) bool) {
 		for reader.Scan() {
-			chunk := reader.Text()
-			if chunk == "" {
+			chunk := reader.Bytes()
+			if len(chunk) == 0 {
 				continue
 			}
-			if !yield(chunk, len(reader.Bytes())) {
+			if !yield(chunk, len(chunk)) {
 				return
 			}
 		}
