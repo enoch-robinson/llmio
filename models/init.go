@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/atopos31/llmio/consts"
+	"github.com/atopos31/llmio/pkg/env"
 	"github.com/atopos31/llmio/pkg/sqlitex"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -23,6 +24,27 @@ var DB *gorm.DB
 // 前者只能从文件系统量（SQLite 的 page_count*page_size 不含 WAL 与页头开销）。
 var DBPath string
 
+// WALEnv 是"把库切到 WAL 日志模式"的开关（`true`/`false`，默认关闭）。
+//
+// 默认关闭的理由不是 WAL 不好，而是切换是**改库文件头**的持久动作，并且会
+// 让两条既有运维习惯失效："拷一个 .db 就是备份"和"文件多大就是库多大"。
+// 它们分别由 VerifyBackup 与 DBFileSize 兜住（见 docs/db-wal-evaluation.md），
+// 但真机上的部署形态（容器 / 网络文件系统）没法在测试里覆盖，所以要人自己开。
+//
+// 打开后跑过一段时间再想退回：在**没有别的连接**时执行
+// `PRAGMA journal_mode=DELETE`，不必再动这个开关——WAL 是库的属性，不是进程的。
+const WALEnv = "DB_WAL"
+
+// JournalMode 是 Init 打开库之后**实测**到的日志模式（`delete`/`wal`/…）。
+//
+// 它来自 PRAGMA 而不是环境变量：WAL 写进库文件头之后会一直生效，撤掉开关
+// 也仍是 WAL；反过来，开关打开了也可能因为在网络文件系统上而没生效。
+// 所以能信的只有库自己说的话。空字符串表示没量到，此时一律按非 WAL 处理。
+var JournalMode string
+
+// WALEnabled 报告当前库是否跑在 WAL 下。
+func WALEnabled() bool { return JournalMode == "wal" }
+
 func Init(ctx context.Context, path string) {
 	if err := ensureDBFile(path); err != nil {
 		panic(err)
@@ -31,15 +53,24 @@ func Init(ctx context.Context, path string) {
 	// 原生 driver + database/sql 不会做这件事，泄漏的写事务会把整库锁死到重启
 	// （2026-10-17 线上故障，见 pkg/sqlitex 的包注释）。
 	sqlitex.Register()
+	wal := env.GetWithDefault(WALEnv, false)
 	db, err := gorm.Open(sqlite.Dialector{
 		DriverName: sqlitex.DriverName,
-		DSN:        sqliteDSN(path),
+		DSN:        sqliteDSN(path, wal),
 	}, &gorm.Config{Logger: newGormLogger()})
 	if err != nil {
 		panic(err)
 	}
 	DB = db
 	DBPath = path
+	JournalMode = readJournalMode(db)
+	if wal && !WALEnabled() {
+		// 开关开了却没生效：常见于网络文件系统（WAL 要共享内存，SMB/NFS 上
+		// 要么被拒绝、要么更糟——看起来成功而实际会写坏）。不放弃启动，
+		// 但必须让人知道这不是"以为的 WAL"。
+		slog.Warn("sqlite: DB_WAL 已开启但库没进 WAL，按现状继续",
+			"journal_mode", JournalMode)
+	}
 	// 组缓存只按组 id 索引，而组 id 只在单个库文件内才有意义。走到这里说明
 	// 进程要开始用（可能是另一个）库了，旧缓存一律作废——否则会读到别的库里
 	// 同号的组，症状是"长度对得上、内容全错"，而且不报任何错。
@@ -386,12 +417,41 @@ func ensureModelAutofillPolicyConfig(ctx context.Context) error {
 // 返回 SQLITE_BUSY（**不走 busy_timeout，也没有等待**），于是并发聊天请求的 IO
 // 写入成片失败。BEGIN IMMEDIATE 在事务开头就把 RESERVED 拿到手，并发写者改由
 // busy_timeout 排队，而不是撞死锁。读路径不受影响：GORM 的单条查询不开事务。
-func sqliteDSN(path string) string {
+//
+// WAL（`wal`）下这一条只更重要：deferred 读事务在快照过期后再写会直接返回
+// SQLITE_BUSY_SNAPSHOT，同样绕开 busy_timeout。
+func sqliteDSN(path string, wal bool) string {
+	params := []string{"_txlock=immediate"}
+	if wal {
+		// 三条都写进 DSN 而不是开头执行一次：`_pragma` 是**每条新连接**建连时
+		// 应用的，而 synchronous 与 busy_timeout 都是连接级设置。
+		params = append(params,
+			// 开 WAL 本身。在已开启的库上它是个很便宜的 no-op。
+			"_pragma=journal_mode(WAL)",
+			// NORMAL 是 WAL 的标准搭配：提交不再 fsync，断电可能丢掉最后几笔
+			// 已提交的事务，但库不会坏。对一份"请求日志"来说这个交换成立。
+			"_pragma=synchronous(NORMAL)",
+			// 显式钉住驱动的默认值（5000ms）：迁移/清理/回收几条路的批次大小
+			// 都是按这个数算的（见 service/storage.go 的 nextBatchSize），
+			// 别让"默认值"哪天悄悄变掉。
+			"_pragma=busy_timeout(5000)",
+		)
+	}
 	sep := "?"
 	if strings.Contains(path, "?") {
 		sep = "&"
 	}
-	return path + sep + "_txlock=immediate"
+	return path + sep + strings.Join(params, "&")
+}
+
+// readJournalMode 问库"你现在跑在什么日志模式下"。读不到就给空串（按非 WAL 处理）。
+func readJournalMode(db *gorm.DB) string {
+	var mode string
+	if err := db.Raw(`PRAGMA journal_mode`).Row().Scan(&mode); err != nil {
+		slog.Warn("sqlite: 读 journal_mode 失败，按非 WAL 处理", "error", err)
+		return ""
+	}
+	return strings.ToLower(mode)
 }
 
 func ensureDBFile(path string) error {

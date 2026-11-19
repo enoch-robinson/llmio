@@ -184,6 +184,7 @@
 | `GIN_MODE` | Gin 运行模式 | 由 Gin 自读 | 不能。 |
 | `TZ` | 日志/调度的时区 | 由运行环境决定（main.go:40 仅打印） | 不能。峰谷计费的分时判定依赖它，属启动期决定。 |
 | `DB_VACUUM` | 启动时对 SQLite 做 VACUUM | models/init.go:79 | 不能。启动期一次性动作。 |
+| `DB_WAL` | 把库切到 WAL 日志模式（默认关） | models/init.go 的 `WALEnv` | 不能。改的是库文件头，属运维动作；评估见 `docs/db-wal-evaluation.md`。 |
 | `LLMIO_QUOTA_CONFIG` | 配额配置文件路径 | quota/config.go:126 | 不能，见 ⑤。 |
 | `LLMIO_QUOTA_ALLOW_WRITE` | 配额写操作开关 | quota/config.go:139 | 不能，见 ⑤；前端只能显示其后果。 |
 

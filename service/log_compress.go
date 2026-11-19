@@ -1135,6 +1135,12 @@ func PauseLogCompress(ctx context.Context) (*models.LogCompressState, error) {
 // 出问题时最省事的路是把备份盖回去，所以进状态页的必须是**自己量出来的事实**
 // ——大小与 mtime——而不是操作员口头保证的。
 //
+// WAL 下"比库小"这一条恰好也挡住了半截备份：主库文件只装已 checkpoint 的页，
+// 服务运行时直接拷 `.db` 会丢掉 `-wal` 里的东西，而传进来的 dbSize 包含
+// `-wal`（见 DBFileSize），于是那份拷贝会被判成 stale。想要一份能用的备份，
+// 先 `PRAGMA wal_checkpoint(TRUNCATE)`（或停服务）再拷；那时 `-wal` 被截到 0，
+// 拷贝的大小与 dbSize 对得上。
+//
 // 它只报告，不拦（拦的逻辑在 handler 上，见 §1.5 的 `--allow-in-place`）。
 func VerifyBackup(path string, dbSize int64) models.LogCompressBackup {
 	rec := models.LogCompressBackup{

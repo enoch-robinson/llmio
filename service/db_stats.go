@@ -98,10 +98,11 @@ type DBStats struct {
 	// 长读事务；库跑在 `journal_mode=delete` 下读事务挡写，聊天请求等锁 5 秒
 	// 超时——整站 500。真机回执：回滚后的 7.6 GiB 库上这条聚合 4.24 秒。
 	//
-	// 界面需要的那件事有更准也更便宜的答案：**`file_size`（库文件多大）**。
+	// 界面需要的那件事有更准也更便宜的答案：**`file_size`（库占多少字节）**。
 	// 它本来就是常数量级的 pragma + os.Stat，而且比"三列加总"更全——把块表索引、
 	// freelist、别的东西都算进去了。阶段 6 想修的那个"界面少报 1.4 GiB"，
-	// 至此是由 file_size 直接回答的。
+	// 至此是由 file_size 直接回答的。WAL 下它还含 `-wal`（见 DBFileSize），
+	// 所以这个数始终是"此刻在磁盘上占多少"，而不是"主库文件多大"。
 	//
 	// 分块的字节（GroupBytes）留着：`block_groups` 是张小表（真机 57 MiB / 891 行），
 	// 聚合它 0.03 秒，而且它没有别的口径能替代。
@@ -184,10 +185,15 @@ func cachedDBStats(maxAge time.Duration) (*DBStats, bool) {
 	return &cp, true
 }
 
-// DBFileSize 只量库文件的字节数，**不碰数据库**。
+// DBFileSize 只量库占用的字节数，**不碰数据库**。
 //
 // 「开始迁移」那条路只需要它：原先它调用了整条 stats，于是"迁移能不能开始"
 // 被一次撞锁的读给卡住了。文件大小是个 os.Stat，没有锁可言。
+//
+// WAL 下必须把 `-wal` 一起算进去：主库文件只装**已 checkpoint** 的页，
+// 刚提交还没落进主库的那部分在 `-wal` 里。只量主库会低估占用，而且会让
+// VerifyBackup 把一个"拷主库、丢了未 checkpoint 页"的半截备份判成可用。
+// `-shm` 不算：它只是索引，不是库的内容。
 func DBFileSize() (int64, error) {
 	if models.DBPath == "" {
 		return 0, os.ErrNotExist
@@ -196,7 +202,14 @@ func DBFileSize() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return info.Size(), nil
+	size := info.Size()
+	if models.WALEnabled() {
+		// 文件可能不存在（刚 VACUUM 完、或还一次都没写过）；不存在就是 0，不是错。
+		if wal, err := os.Stat(models.DBPath + "-wal"); err == nil {
+			size += wal.Size()
+		}
+	}
+	return size, nil
 }
 
 func readDBStatsWithRetry(ctx context.Context) (*DBStats, error) {
