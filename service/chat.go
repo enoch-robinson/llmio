@@ -20,6 +20,7 @@ import (
 	"github.com/atopos31/llmio/pkg/token"
 	"github.com/atopos31/llmio/providers"
 	"github.com/samber/lo"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"gorm.io/gorm"
 )
@@ -561,9 +562,17 @@ func buildUpstreamBody(raw []byte, extraBody map[string]any) ([]byte, error) {
 		}
 	}
 
-	rawBody, err := sjson.DeleteBytes(rawBody, "session_id")
-	if err != nil {
-		return nil, fmt.Errorf("delete session_id from upstream body: %w", err)
+	// session_id 是客户端协议里的字段，不能透给上游。
+	//
+	// 先判在不在：sjson.DeleteBytes 无论找不找得到都要重编码整个 body（64 KB 实测
+	// 74 KB 分配），而绝大多数请求根本没有这个键。键不在时 DeleteBytes 的返回值
+	// 与原文逐字节相同（实测：坏 JSON、非 JSON 也一样），所以跳过不改变任何行为。
+	if gjson.GetBytes(rawBody, "session_id").Exists() {
+		deleted, err := sjson.DeleteBytes(rawBody, "session_id")
+		if err != nil {
+			return nil, fmt.Errorf("delete session_id from upstream body: %w", err)
+		}
+		rawBody = deleted
 	}
 	return rawBody, nil
 }
