@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/atopos31/llmio/common"
@@ -32,6 +33,25 @@ func (fw *flushWriter) Write(p []byte) (n int, err error) {
 		}
 	}
 	return
+}
+
+// copyBufPool 复用转发用的 32 KiB 缓冲。
+//
+// io.Copy 每次调用都会新分配一个 32 KiB 缓冲（标准库 copyBuffer 的默认大小），
+// 而每个聊天请求都要走一次这条路。网关是"请求多、每个都不大"的形态，按请求数
+// 计的 32 KiB 就是白白的 GC 压力。
+var copyBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 32<<10)
+		return &buf
+	},
+}
+
+// copyStream 用池化缓冲把上游响应转发给客户端。
+func copyStream(dst io.Writer, src io.Reader) (int64, error) {
+	bufp := copyBufPool.Get().(*[]byte)
+	defer copyBufPool.Put(bufp)
+	return io.CopyBuffer(dst, src, *bufp)
 }
 
 func ChatCompletionsHandler(c *gin.Context) {
@@ -154,7 +174,7 @@ func chatHandler(c *gin.Context, preProcessor service.Beforer, postProcessor ser
 		writer = &flushWriter{w: c.Writer}
 	}
 
-	if _, err := io.Copy(writer, tee); err != nil {
+	if _, err := copyStream(writer, tee); err != nil {
 		// 转发给客户端失败（多半是客户端/中间代理断开）。这里离请求 ctx 最近，
 		// 由它负责打上阶段与「客户端断开」归因——错误经管道传给 RecordLog 落库，
 		// 那边拿到的已是 Background ctx，补不出归因。
