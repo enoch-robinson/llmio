@@ -78,11 +78,11 @@ docker run -d \
 ### Local Run
 Download the release package for your OS/arch from [releases](https://github.com/enoch-robinson/llmio/releases). Example for linux amd64:
 ```bash
-wget https://github.com/enoch-robinson/llmio/releases/download/v0.10.3-enoch.2/llmio_0.10.3-enoch.2_linux_amd64.tar.gz
+wget https://github.com/enoch-robinson/llmio/releases/download/v0.10.3-enoch.3/llmio_0.10.3-enoch.3_linux_amd64.tar.gz
 ```
 Extract:
 ```bash
-tar -xzf ./llmio_0.10.3-enoch.2_linux_amd64.tar.gz
+tar -xzf ./llmio_0.10.3-enoch.3_linux_amd64.tar.gz
 ```
 Start:
 ```bash
