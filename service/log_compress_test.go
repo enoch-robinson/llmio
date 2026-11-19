@@ -779,7 +779,13 @@ func TestLogCompress_PausesBetweenBatches(t *testing.T) {
 	}
 	seedPlaintextRows(t, ctx, bodies, time.Hour)
 	// 一批一行，把"批间"这个窗口撑得足够宽。
-	mustPolicy(t, ctx, &models.LogCompressPolicy{Enabled: true, BatchRows: 1, QuiesceSec: 0})
+	//
+	// BatchIntervalMs 必须大于 0：若批间不留停顿，整轮迁移可能在测试的轮询
+	// 循环（读库 + 1ms 睡眠）看到 LastID > 0 之前就跑完——暂停落地时状态已是
+	// done，断言就变成对调度器速度的押注（全量套件并行负载下轮询更容易落后）。
+	// 批间停顿的语义本来就是"暂停最多隔 compressSleepSlice 生效"，给它一个
+	// 3 秒窗口，暂停就必然落在批与批之间，与机器快慢无关。
+	mustPolicy(t, ctx, &models.LogCompressPolicy{Enabled: true, BatchRows: 1, QuiesceSec: 0, BatchIntervalMs: 3000})
 
 	done := make(chan struct{})
 	var state *models.LogCompressState
