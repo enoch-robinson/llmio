@@ -14,10 +14,18 @@ import { copyToClipboard } from "@/lib/utils";
 import { toast } from "sonner";
 import { Copy, Check } from "lucide-react";
 import { useTheme } from "@/components/theme-provider";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { PrismLight as SyntaxHighlighter } from "react-syntax-highlighter";
+import bash from "react-syntax-highlighter/dist/esm/languages/prism/bash";
+import python from "react-syntax-highlighter/dist/esm/languages/prism/python";
+import typescript from "react-syntax-highlighter/dist/esm/languages/prism/typescript";
 import { duotoneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { duotoneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { Switch } from "@/components/ui/switch";
+
+// 全量 Prism 含所有语言（chunk 超 600KB），页面只高亮这三种接入示例，按需注册。
+SyntaxHighlighter.registerLanguage("bash", bash);
+SyntaxHighlighter.registerLanguage("typescript", typescript);
+SyntaxHighlighter.registerLanguage("python", python);
 
 type ApiFormat = "openai-completions" | "openai-responses" | "anthropic-messages" | "google-generative";
 type CodeLanguage = "curl" | "typescript" | "python";

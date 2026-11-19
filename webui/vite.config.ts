@@ -33,8 +33,9 @@ export default defineConfig({
             '@radix-ui/react-tooltip'
           ],
 
-          // 图表库
-          'charts-vendor': ['recharts', 'lucide-react'],
+          // 图表库。lucide-react 不进 vendor：它被首屏急加载组件引用，捆进来会把
+          // recharts 一起拖进 entry 的 modulepreload，无图表页面也要下载解析。
+          'charts-vendor': ['recharts'],
 
           // 表单和验证
           'form-vendor': ['react-hook-form', '@hookform/resolvers', 'zod'],
