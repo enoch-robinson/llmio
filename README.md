@@ -98,9 +98,11 @@ The service will create `./db/llmio.db` in the current directory as the SQLite p
 | `GIN_MODE` | Gin runtime mode | `debug` | Use `release` in production |
 | `LLMIO_SERVER_PORT` | Server listen port | `7070` | Service listen port |
 | `TZ` | Timezone for logs and scheduling | Host default | Recommend explicit setting in containers (e.g. `Asia/Shanghai`) |
+| `LOG_LEVEL` | Minimum level for application logs (`debug` `info` `warn` `error`) | `info` | Per-request details (request routing, provider selection) are logged at debug; set to `debug` temporarily while troubleshooting |
 | `DB_COMPRESS` | Store newly written request bodies in compressed form | `true` | Setting it to `false` affects new rows only; previously compressed rows remain readable |
 | `DB_VACUUM` | Run SQLite VACUUM once on startup | Disabled | Set to `true` to enable. VACUUM takes an exclusive write lock and needs free disk of about 2× the database size |
 | `DB_AUTO_VACUUM_REBUILD` | Rebuild an existing database on startup to enable incremental space reclamation | `auto` | `auto` sets `auto_vacuum` on empty databases only; `on` converts an existing database with a single VACUUM (minutes, exclusive write lock, 2× disk required); `off` never modifies it. Any other value is treated as `auto` |
+| `DB_WAL` | Switch SQLite to WAL journal mode with `synchronous=NORMAL` | Disabled | Only open on local filesystems (not NFS/SMB). Evaluation, switch/rollback steps and the real-machine checklist: [docs/db-wal-evaluation.md](docs/db-wal-evaluation.md) |
 | `LLMIO_QUOTA_CONFIG` | Path of the quota configuration file | `./db/quota.config.json` | Changes only the file location; its contents (credentials included) are read and written by the console and never stored in the database |
 | `LLMIO_QUOTA_ALLOW_WRITE` | Whether quota write endpoints are enabled | Writes allowed | Only the exact value `false` (case-sensitive) switches to read-only mode, where every write endpoint under `/api/quota` returns 403; test runs change no state and are unaffected |
 

@@ -175,7 +175,9 @@ func doWithHeaderTimeout(ctx context.Context, client *http.Client, req *http.Req
 // 返回的 cancel 与响应体生命周期一致,调用方在响应体消费完毕后必须调用,
 // 以释放按请求包装的上游 context。
 func BalanceChat(ctx context.Context, start time.Time, style string, before Before, providersWithMeta ProvidersWithMeta, reqMeta models.ReqMeta, bridgeNotes *BridgeNotes) (*http.Response, *models.ChatLog, context.CancelCauseFunc, error) {
-	slog.Info("request", "model", before.Model, "stream", before.Stream, "tool_call", before.toolCall, "structured_output", before.structuredOutput, "image", before.image)
+	// 每请求明细（本行与下面的 using provider / bridging protocols）都在 Debug 级：
+	// 生产默认看不见，排查路由问题时设 LOG_LEVEL=debug 临时打开，不必改代码重编。
+	slog.Debug("request", "model", before.Model, "stream", before.Stream, "tool_call", before.toolCall, "structured_output", before.structuredOutput, "image", before.image)
 
 	providerMap := providersWithMeta.ProviderMap
 
@@ -287,7 +289,7 @@ func BalanceChat(ctx context.Context, start time.Time, style string, before Befo
 
 			client := providers.GetClient(provider.Proxy)
 
-			slog.Info("using provider", "provider", provider.Name, "model", modelWithProvider.ProviderModel)
+			slog.Debug("using provider", "provider", provider.Name, "model", modelWithProvider.ProviderModel)
 
 			// 每换一家上游，记账从头计：上一家的记账若留着，最终那条日志就会记着
 			// 产出这次响应的那家**没做过**的改写
@@ -297,7 +299,7 @@ func BalanceChat(ctx context.Context, start time.Time, style string, before Befo
 			// （见 ProvidersWithMetaBymodelsName），所以每次 Pop 之后重新判一次方向
 			translator := TranslatorFor(style, provider.Type)
 			if translator != nil {
-				slog.Info("bridging protocols", "from", style, "to", provider.Type, "provider", provider.Name)
+				slog.Debug("bridging protocols", "from", style, "to", provider.Type, "provider", provider.Name)
 			}
 
 			// 分时段计价：按请求发起时刻 + **这一条关联的**峰谷条款解析出

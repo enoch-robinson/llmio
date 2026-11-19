@@ -164,7 +164,7 @@ func chatHandler(c *gin.Context, preProcessor service.Beforer, postProcessor ser
 	if !authKeyIOLog {
 		before.ClearRaw()
 	}
-	slog.Info("start recording log", "logId", logId, "authKeyIOLog", authKeyIOLog)
+	slog.Debug("start recording log", "logId", logId, "authKeyIOLog", authKeyIOLog)
 	go service.RecordLog(context.Background(), startReq, pr, postProcessor, logId, *before, authKeyIOLog, bridgeNotes)
 	writeHeader(c, before.Stream, res.Header)
 

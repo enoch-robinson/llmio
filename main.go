@@ -34,6 +34,12 @@ func init() {
 		}
 	}
 
+	// 日志级别走环境变量（默认 info）。热路径的每请求明细（request /
+	// using provider 等）已降到 Debug：生产默认看不见，排查路由问题时设
+	// LOG_LEVEL=debug 临时打开，不必改代码重编。
+	// 用 SetLogLoggerLevel 而不是换 handler：默认 logger 的输出格式保持原样。
+	slog.SetLogLoggerLevel(logLevelFromEnv(env.GetWithDefault("LOG_LEVEL", "")))
+
 	ctx := context.Background()
 	models.Init(ctx, demoDBPath())
 	if demoSeedEnabled() {
@@ -268,6 +274,24 @@ func seedPolicyConfigs(ctx context.Context) {
 			slog.Error("策略配置种子写失败（读侧会回默认值，服务不受影响）",
 				"key", seed.name, "error", err)
 		}
+	}
+}
+
+// logLevelFromEnv 解析 LOG_LEVEL，认不出的值回 info 并打一条警告。
+// 空值（未设置）也是 info：默认行为与升级前完全一致。
+func logLevelFromEnv(value string) slog.Level {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "debug":
+		return slog.LevelDebug
+	case "", "info":
+		return slog.LevelInfo
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		slog.Warn("LOG_LEVEL 不认识，按 info 处理", "LOG_LEVEL", value)
+		return slog.LevelInfo
 	}
 }
 
