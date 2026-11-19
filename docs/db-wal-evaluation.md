@@ -188,19 +188,40 @@ sqlite3 db/llmio.db 'PRAGMA journal_mode=DELETE;'
 ## 七、待真机验证清单（本环境做不了）
 
 本环境没有生产库副本（`LLMIO_REAL_DB_COPY` 未设置，`db/llmio.db` 是一个 274 KB 的空库），
-以下几项**没有**任何本环境证据：
+以下几项**没有**任何本环境证据。
 
-1. **`SQLITE_BUSY` 频次**：在 7 GiB 真库上，开启 `DB_WAL` 前后各跑一段真实流量，
-   统计 `database is locked` / `SQLITE_BUSY` 计数。这是本项收益的**唯一直接指标**。
-2. **p95 首包延迟**：同一段流量下对比。预期改善主要出现在"状态页轮询 + 迁移/回收并发"时。
-3. **`-wal` 峰值**：迁移跑满一批（`nextBatchSize` 目标 2.5 秒）时 `-wal` 涨到多大；
-   如果超过磁盘余量，需要调低 `wal_autocheckpoint` 或缩短长读。
-4. **checkpoint 是否被长读挡住**：状态页 5 秒冷却 + 4 秒级聚合读期间，写入侧是否出现
-   WAL 持续增长而 checkpoint 不推进（`PRAGMA wal_checkpoint(PASSIVE)` 的返回列可观测）。
-5. **VACUUM / `DB_AUTO_VACUUM_REBUILD=on` 在 WAL 库上的行为**：时长、文件大小、freelist。
-6. **容器文件系统形态**：`db/` 必须是本地卷。若是 bind mount 到网络路径，`DB_WAL`
-   不能开。
-7. **回退演练**：`journal_mode=DELETE` 之后服务正常启动、`DBFileSize` 回到只量主库。
+### 7.1 已自动化的部分（真机上对副本跑）
+
+第七节里能在 `go test` 里做掉的一半已落成用例（`service/db_wal_real_test.go`），对一份
+**可写副本**跑——用例会开 WAL、真写、最后把副本翻回 delete：
+
+```bash
+# PowerShell
+$env:LLMIO_REAL_DB_COPY="D:\llmio-test\work-wal\real.db"
+go test ./service/ -run TestWAL_RealCopyAcceptance -v -timeout 30m
+```
+
+| 子测试 | 对应清单项 | 回答什么 |
+|---|---|---|
+| 长读不再挡写 | 第 1/2 条的机制面 | 同一句闯过祸的全表重读持锁期间，写请求零失败、不等满 busy_timeout |
+| wal峰值与checkpoint推进 | 第 3、4 条 | 并发写 + 长读 10 秒内 `-wal` 涨到多大；PASSIVE 在长读期间是否 busy、读释放后能否追上；TRUNCATE 截不截得干净 |
+| 提交吞吐 | （新增，喂 SaveChatLog 决策） | 真磁盘上 1 KB 行单条自动提交的 µs 级单价——本机 10355 次/秒不代表生产磁盘 |
+| 回退到delete | 第 7 条 | `journal_mode=DELETE` 翻回、`-wal` 截干净、写入照常 |
+
+第 5 条（VACUUM 在 WAL 上）也自动化了，但要把整库重写一遍，单独点名才跑：
+
+```bash
+$env:LLMIO_REAL_DB_COPY="D:\llmio-test\work-wal\real.db"
+$env:LLMIO_WAL_REAL_VACUUM="on"
+go test ./service/ -run TestWAL_RealCopyVacuumOnWAL -v -timeout 180m
+```
+
+### 7.2 仍需手工的部分
+
+1. **`SQLITE_BUSY` 频次**（唯一直接指标）：开 `DB_WAL` 前后各跑一段真实流量，前后各数一次撞锁痕迹：
+   `docker logs <容器> 2>&1 | grep -c "撞锁"`（chat io 撞锁退回明文的重试日志）。预期：开关打开后归零或只剩个位数。
+2. **p95 首包延迟**：状态页的延迟分布（`/api/metrics/stats`）在切换前后各取一个同长度时间窗对比。预期改善集中在「状态页轮询 + 迁移/回收并发」时段。
+3. **容器文件系统形态**（第 6 条）：`docker exec <容器> df -T /app/db`——必须是本地文件系统（ext4/xfs 等）；nfs/cifs/9p 上 `DB_WAL` 不能开。测试机上 `requireWALMode` 也会挡一道：进不了 WAL 的库会直接红。
 
 复跑本环境已有证据：
 
