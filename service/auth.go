@@ -90,8 +90,13 @@ func KeyUpdate(keyID uint, usedAt time.Time) {
 func backgroundFlush() {
 	for range time.Tick(10 * time.Second) {
 		ctx := context.Background()
+		// 只在锁内做快照交换，DB 写放到锁外：mu 同时被每个请求路径上的 KeyUpdate
+		// 争用，持锁写库会让全站鉴权在磁盘慢或撞 SQLite 写锁时排队秒级延迟。
 		mu.Lock()
-		for keyID, item := range updateCounts {
+		pending := updateCounts
+		updateCounts = make(map[uint]KeyUpdateItem) // 清空计数
+		mu.Unlock()
+		for keyID, item := range pending {
 			if err := models.DB.Model(&models.AuthKey{}).WithContext(ctx).Where("id = ?", keyID).Updates(map[string]any{
 				"usage_count":  gorm.Expr(fmt.Sprintf("usage_count + %d", item.Count)),
 				"last_used_at": item.UsedAt,
@@ -99,7 +104,5 @@ func backgroundFlush() {
 				slog.Error("Failed to update auth key usage count", "error", err)
 			}
 		}
-		updateCounts = make(map[uint]KeyUpdateItem) // 清空计数
-		mu.Unlock()
 	}
 }
