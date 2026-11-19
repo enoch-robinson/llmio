@@ -281,18 +281,56 @@ func (s *BlockStore) Put(ctx context.Context, tx *gorm.DB, plain []byte) ([]uint
 // 才越接近 BlockGroupTarget；但整批原文要同时在内存里，事务越大回滚也越贵。
 // 调用方按"行数 + 原文字节"双重封顶。
 //
-// 顺序即组归属：块按**首次出现顺序**攒进组，与 insertBlockGroups、压实、
+// 顺序即组归属：块按**首次出现顺序**攒进组，与 insertGroups、压实、
 // 阶段 0 基准车完全同规则。
+//
+// 内部拆成 PrepareBatch（CPU + 只读查库）与 CommitBatch（事务内 SQL）两半：
+// 写路径（钩子事务内）走 PutBatch 一步不差；迁移把 PrepareBatch 放到事务外，
+// 让 level-9 压帧与解压自检的 CPU 不再占用写锁。
 func (s *BlockStore) PutBatch(ctx context.Context, tx *gorm.DB, plains [][]byte) ([][]uint32, error) {
-	rowRefs := make([][]uint32, len(plains))
+	plan, err := s.PrepareBatch(ctx, tx, plains)
+	if err != nil {
+		return nil, err
+	}
+	return s.CommitBatch(ctx, tx, plan)
+}
+
+// BatchPlan 是 PrepareBatch 的产物：分块、摘要与"库里还没有的块"的组帧。
+//
+// 前半程全是 CPU（分块、SHA-256、level-9 压帧、解压自检），不写任何一行；
+// 后半程 CommitBatch 才在调用方的事务里做 SQL。两半共用同一套攒组与落库代码，
+// 所以"先算后写"（迁移）与"边算边写"（写路径）写出的形态逐字节同形。
+type BatchPlan struct {
+	// rowDigests 与输入逐行对齐（空 body / 分不出块的行为 nil），是拼引用的骨架。
+	rowDigests [][][16]byte
+	// allDigests 是全部块的摘要，去重查询与入组的依据（与 rowDigests 摊平后同序）。
+	allDigests [][16]byte
+	// groups 是预判缺块按首次出现顺序攒好、压好、自检过的组，只差事务内 INSERT。
+	groups []groupPlan
+}
+
+// groupPlan 是一个压好并自检过的组：帧与块元数据都在，只差事务内 INSERT。
+// 块行不带 id——组行的 id 由事务内 INSERT 才产生。
+type groupPlan struct {
+	frame   []byte
+	rawLen  int
+	digests [][16]byte
+	offs    []int
+	sizes   []int
+}
+
+// PrepareBatch 是 PutBatch 的前半程：分块、摘要、缺块判定（只读查询）、攒组压帧。
+//
+// q 可以是事务，也可以是普通句柄——迁移在事务外调用它（CPU 移出写锁窗口）；
+// 写路径在行插入的事务内调用它。缺块判定在 q 上读；CommitBatch 会在事务内
+// **再查一次**，所以两次之间别的写者插入同一块也不影响正确性（整组都已存在
+// 时直接跳过，见 insertGroups）。
+func (s *BlockStore) PrepareBatch(ctx context.Context, q *gorm.DB, plains [][]byte) (*BatchPlan, error) {
+	plan := &BatchPlan{rowDigests: make([][][16]byte, len(plains))}
 
 	// 1. 把这一批所有的块都点出来。rowDigests 按行留一份，最后拼引用序列用；
 	//    allDigests / allChunks 下标一一对应，是查表与入组的依据。
-	var (
-		rowDigests = make([][][16]byte, len(plains))
-		allDigests [][16]byte
-		allChunks  [][]byte
-	)
+	var allChunks [][]byte
 	for i, plain := range plains {
 		if len(plain) == 0 {
 			continue
@@ -309,14 +347,14 @@ func (s *BlockStore) PutBatch(ctx context.Context, tx *gorm.DB, plains [][]byte)
 			ds = append(ds, compress.Digest(ch))
 			allChunks = append(allChunks, ch)
 		}
-		rowDigests[i] = ds
-		allDigests = append(allDigests, ds...)
+		plan.rowDigests[i] = ds
+		plan.allDigests = append(plan.allDigests, ds...)
 	}
-	if len(allDigests) == 0 {
-		return rowRefs, nil
+	if len(plan.allDigests) == 0 {
+		return plan, nil
 	}
 
-	known, err := lookupBlocks(ctx, tx, allDigests)
+	known, err := lookupBlocks(ctx, q, plan.allDigests)
 	if err != nil {
 		return nil, err
 	}
@@ -325,9 +363,9 @@ func (s *BlockStore) PutBatch(ctx context.Context, tx *gorm.DB, plains [][]byte)
 	//    只插一次，这也是批量相对逐行多出来的一份收益。
 	var (
 		missing []blockPending
-		seen    = make(map[[16]byte]bool, len(allDigests))
+		seen    = make(map[[16]byte]bool, len(plan.allDigests))
 	)
-	for i, d := range allDigests {
+	for i, d := range plan.allDigests {
 		if _, ok := known[d]; ok || seen[d] {
 			continue
 		}
@@ -335,12 +373,34 @@ func (s *BlockStore) PutBatch(ctx context.Context, tx *gorm.DB, plains [][]byte)
 		missing = append(missing, blockPending{digest: d, data: allChunks[i]})
 	}
 	if len(missing) > 0 {
-		if err := insertBlockGroups(ctx, tx, missing); err != nil {
+		plan.groups, err = planGroups(missing)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return plan, nil
+}
+
+// CommitBatch 是 PutBatch 的后半程：只在调用方的事务里做 SQL，CPU 只剩拼引用。
+func (s *BlockStore) CommitBatch(ctx context.Context, tx *gorm.DB, plan *BatchPlan) ([][]uint32, error) {
+	rowRefs := make([][]uint32, len(plan.rowDigests))
+	if len(plan.allDigests) == 0 {
+		return rowRefs, nil
+	}
+
+	// 权威去重：PrepareBatch 可能在事务外跑过，期间别的写者可能刚插了同一批块。
+	known, err := lookupBlocks(ctx, tx, plan.allDigests)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(plan.groups) > 0 {
+		if err := insertGroups(ctx, tx, plan.groups, known); err != nil {
 			return nil, err
 		}
 		// 回查拿 id：新插入的行在这一刻还不知道自己的 id，
 		// 而并发写入（另一个进程刚插过同一个块）也只有回查才能拿到确定的结果。
-		got, err := lookupBlocks(ctx, tx, digestsOf(missing))
+		got, err := lookupBlocks(ctx, tx, digestsOfGroups(plan.groups))
 		if err != nil {
 			return nil, err
 		}
@@ -350,7 +410,7 @@ func (s *BlockStore) PutBatch(ctx context.Context, tx *gorm.DB, plains [][]byte)
 	}
 
 	// 3. 拼回每一行的引用序列。
-	for i, ds := range rowDigests {
+	for i, ds := range plan.rowDigests {
 		if len(ds) == 0 {
 			continue
 		}
@@ -404,10 +464,10 @@ type blockPending struct {
 	data   []byte
 }
 
-func digestsOf(ps []blockPending) [][16]byte {
-	out := make([][16]byte, len(ps))
-	for i := range ps {
-		out[i] = ps[i].digest
+func digestsOfGroups(groups []groupPlan) [][16]byte {
+	var out [][16]byte
+	for _, g := range groups {
+		out = append(out, g.digests...)
 	}
 	return out
 }
@@ -446,7 +506,7 @@ func lookupBlocks(ctx context.Context, tx *gorm.DB, digests [][16]byte) (map[[16
 	return out, nil
 }
 
-// insertBlockGroups 把 missing 里的块攒成组写下去。
+// planGroups 把缺块按首次出现顺序攒组、压帧、自检（INV-3）。纯 CPU，不碰库。
 //
 // 攒到现在这一批就封口，不跨调用攒——因为**写入必须与行插入同一个事务**（INV-1）。
 // 跨请求攒组就意味着组要先于引用落库，事务一失败就留下一堆没人引用的组。
@@ -465,9 +525,9 @@ func lookupBlocks(ctx context.Context, tx *gorm.DB, digests [][16]byte) (map[[16
 // 每组一个压缩帧，压完**立刻解回来比对**（INV-3）：组是冷数据，压一次就长期
 // 躺着，多花一次解码换"压缩代码有 bug 也变不成数据损坏"，是这套方案里
 // 性价比最高的一道保险。
-func insertBlockGroups(ctx context.Context, tx *gorm.DB, missing []blockPending) error {
-	db := freshDB(tx, ctx)
+func planGroups(missing []blockPending) ([]groupPlan, error) {
 	var (
+		plans   []groupPlan
 		buf     []byte
 		bufOff  []int
 		bufSize []int
@@ -481,35 +541,14 @@ func insertBlockGroups(ctx context.Context, tx *gorm.DB, missing []blockPending)
 		if !ok {
 			return errors.New("compress: 块组自检没过，拒绝写入")
 		}
-		group := BlockGroup{Data: frame, RawLen: len(buf)}
-		// 组表与块表各查各的，都得用没被外层污染过的 statement。
-		// 注意 flush 会被调用多次（一组写满就写下一组），每次都重新取，
-		// 因为上一条 Create 已经把这条 statement 的表名钉住了。
-		if err := freshDB(db, nil).Create(&group).Error; err != nil {
-			return err
-		}
-		blocks := make([]Block, 0, len(bufDig))
-		for i := range bufDig {
-			blocks = append(blocks, Block{
-				Digest:  bufDig[i][:],
-				Size:    bufSize[i],
-				GroupID: group.ID,
-				Off:     bufOff[i],
-			})
-		}
-		// 撞唯一索引说明别的进程刚插过同一个块：忽略即可，回查会拿到它。
-		if err := freshDB(db, nil).Clauses(clause.OnConflict{DoNothing: true}).
-			Create(&blocks).Error; err != nil {
-			return err
-		}
+		plans = append(plans, groupPlan{frame: frame, rawLen: len(buf), digests: bufDig, offs: bufOff, sizes: bufSize})
 		buf, bufOff, bufSize, bufDig = nil, nil, nil, nil
 		return nil
 	}
-
 	for _, m := range missing {
 		if len(buf) > 0 && len(buf)+len(m.data) > BlockGroupTarget {
 			if err := flush(); err != nil {
-				return err
+				return nil, err
 			}
 		}
 		bufOff = append(bufOff, len(buf))
@@ -517,7 +556,53 @@ func insertBlockGroups(ctx context.Context, tx *gorm.DB, missing []blockPending)
 		bufDig = append(bufDig, m.digest)
 		buf = append(buf, m.data...)
 	}
-	return flush()
+	if err := flush(); err != nil {
+		return nil, err
+	}
+	return plans, nil
+}
+
+// insertGroups 在事务里把压好的组与块行写下去。
+//
+// known 是本次事务里**权威**的已有块集合：整组的块都已在库里（事务外的缺块
+// 预判之后，别的写者刚插过）时直接跳过，不写一条注定成为孤儿的组行。部分块
+// 已存在时组照写——块行靠唯一索引 ON CONFLICT DO NOTHING 忽略重复，组内那些
+// 块的字节成为组内孤儿（无害），回查会拿到已存在块的 id。
+func insertGroups(ctx context.Context, tx *gorm.DB, groups []groupPlan, known map[[16]byte]blockLoc) error {
+	db := freshDB(tx, ctx)
+	for _, g := range groups {
+		allKnown := true
+		for _, d := range g.digests {
+			if _, ok := known[d]; !ok {
+				allKnown = false
+				break
+			}
+		}
+		if allKnown {
+			continue
+		}
+		group := BlockGroup{Data: g.frame, RawLen: g.rawLen}
+		// 组表与块表各查各的，都得用没被外层污染过的 statement。
+		// 注意每次建组都要重新取 db，因为上一条 Create 已经把这条 statement 的表名钉住了。
+		if err := freshDB(db, nil).Create(&group).Error; err != nil {
+			return err
+		}
+		blocks := make([]Block, 0, len(g.digests))
+		for i := range g.digests {
+			blocks = append(blocks, Block{
+				Digest:  g.digests[i][:],
+				Size:    g.sizes[i],
+				GroupID: group.ID,
+				Off:     g.offs[i],
+			})
+		}
+		// 撞唯一索引说明别的进程刚插过同一个块：忽略即可，回查会拿到它。
+		if err := freshDB(db, nil).Clauses(clause.OnConflict{DoNothing: true}).
+			Create(&blocks).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Get 按引用序列还原原文。

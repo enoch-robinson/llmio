@@ -842,9 +842,54 @@ func fetchCompressCandidates(
 //
 // `state` 只在事务提交成功之后才被写回——这一批的计数必须与这一批的数据同生共死，
 // 否则失败重跑会把同一批的字节数记两遍，进度条与"省了多少"当场失真。
+// packPlan 是压缩路在**事务外、锁外**已经算好的东西：
+//
+//   - prepared：input 列的分块/摘要/组帧/自检（SQL 提交时只差插入与回查）；
+//   - responses：响应两列的纯值变换与空值归一化结论。
+//
+// 这些计算的输入都是 fetchCompressCandidates 抓下来的行字节，与事务内重读
+// 无关，所以搬到事务外不改变语义。搬出去的是分块、SHA-256、level-9 压帧、
+// 解压自检的 CPU；事务（delete 日志模式下即写锁）只剩 SQL。
+type packPlan struct {
+	prepared  *models.PreparedBodies
+	responses []columnPatch
+}
+
+// preparePackPlan 把压缩路的 CPU 先算完。只发只读查询（块表去重），不开事务。
+func preparePackPlan(ctx context.Context, rows []compressRow) (*packPlan, error) {
+	inputs := make([][]byte, len(rows))
+	for i, r := range rows {
+		inputs[i] = r.stored[colInput]
+	}
+	prepared, err := models.PrepareBodies(ctx, models.DB, inputs)
+	if err != nil {
+		return nil, err
+	}
+	responses := make([]columnPatch, len(rows))
+	for i, r := range rows {
+		for _, c := range []int{colOfString, colOfArray} {
+			responses[i][c] = packColumn(r, c, models.PackColumnValue(r.stored[c]))
+		}
+	}
+	return &packPlan{prepared: prepared, responses: responses}, nil
+}
+
 func applyCompressBatch(
 	ctx context.Context, mode compressMode, rows []compressRow, state *models.LogCompressState,
 ) error {
+	// 压缩路的 CPU（分块/摘要/组帧/自检）先在**事务外**算完。这一步只发只读
+	// 查询，不持维护锁也不开事务——写锁窗口从"包含 CPU"缩到"只有 SQL"。
+	// 回滚（modeUnpack）暂不拆：它不在稳态关键路径上，解压还要读块表，
+	// 留在事务内保持原子性，不在本次扩大改动面。
+	var plan *packPlan
+	if mode == modePack {
+		var err error
+		plan, err = preparePackPlan(ctx, rows)
+		if err != nil {
+			return err
+		}
+	}
+
 	// 锁必须在**事务之外、之前**取。
 	//
 	// 反过来（先开事务再取锁）会和日志清理组成经典死锁：清理是"先取维护锁、
@@ -855,7 +900,7 @@ func applyCompressBatch(
 
 	next := *state // 值拷贝：提交成功才生效
 	err := models.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		patches, err := rewriteBodies(ctx, mode, tx, rows)
+		patches, err := rewriteBodies(ctx, mode, tx, rows, plan)
 		if err != nil {
 			return err
 		}
@@ -931,32 +976,33 @@ type columnPatch [colCount]columnValue
 // `PackColumnValue` / `UnpackColumnValue`。喂错函数的后果不是报错而是**解错**：
 // 拿纯值变换去解引用序列，会把块表引用当成一段坏掉的压缩流。
 //
+// 压缩路（modePack）的一切 CPU 已在 `preparePackPlan` 里于事务外算完，
+// 这里只剩 `PreparedBodies.Commit` 的事务内 SQL（去重、插入、回查）与拼值。
+//
 // 落库的值统一交 `models.BodyBytes` 包（在 setColumn 里）：它是"让内容决定
 // 存储类"的那个类型，明文落 TEXT、帧落 BLOB。回滚这条路尤其不能写错——
 // 把明文按 BLOB 写回去，列里的格式就错了（`typeof` 不再对应形态），
 // 而**读路径仍然读得出来**，于是这个错会一直躺着，直到下一次迁移把它漏掉。
 func rewriteBodies(
-	ctx context.Context, mode compressMode, tx *gorm.DB, rows []compressRow,
+	ctx context.Context, mode compressMode, tx *gorm.DB, rows []compressRow, plan *packPlan,
 ) ([]columnPatch, error) {
 	out := make([]columnPatch, len(rows))
 
 	if mode == modePack {
-		// input 整列先取出来一起过 PackBodies：块要在**这一批内**封组，
-		// 逐行各封各的会让组平均只有 7.70 KiB（阶段 3 真机实测），
-		// 远低于 flate 的 32 KiB 窗口，白省 35.9%。见 models.PackBodies。
-		inputs := make([][]byte, len(rows))
-		for i, r := range rows {
-			inputs[i] = r.stored[colInput]
+		if plan == nil {
+			return nil, errors.New("compress: 压缩批缺少事务外预计算结果")
 		}
-		packed, err := models.PackBodies(ctx, tx, inputs)
+		// input 整列的块已在 preparePackPlan 里按**这一批**封组并压好，
+		// 这里只把引用拼出来。逐行各封各的会让组平均只有 7.70 KiB
+		// （阶段 3 真机实测），远低于 flate 的 32 KiB 窗口，白省 35.9%。
+		packed, err := plan.prepared.Commit(ctx, tx)
 		if err != nil {
 			return nil, err
 		}
 		for i, r := range rows {
 			out[i][colInput] = packColumn(r, colInput, packed[i])
-			for _, c := range []int{colOfString, colOfArray} {
-				out[i][c] = packColumn(r, c, models.PackColumnValue(r.stored[c]))
-			}
+			out[i][colOfString] = plan.responses[i][colOfString]
+			out[i][colOfArray] = plan.responses[i][colOfArray]
 		}
 		return out, nil
 	}

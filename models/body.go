@@ -190,42 +190,107 @@ func (c *ChatIO) unpackBody(tx *gorm.DB) error {
 // 而迁移是运维动作（L1 降级后仍然要能把历史行迁完、或者反过来还原），
 // 拿写路径的开关去管它，会让"关掉压缩"和"无法收尾"捆在一起。
 func PackBodies(ctx context.Context, tx *gorm.DB, plains [][]byte) ([][]byte, error) {
-	out := make([][]byte, len(plains))
+	p, err := PrepareBodies(ctx, tx, plains)
+	if err != nil {
+		return nil, err
+	}
+	return p.Commit(ctx, tx)
+}
+
+// PreparedBodies 是 PackBodies 的前半程产物：CPU 已算完，SQL 还没动。
+//
+// 它存在的理由只有一个：让迁移把分块、摘要、level-9 压帧与解压自检放到
+// **事务外**，写锁只覆 SQL。所以 PrepareBodies 对块表只发只读查询，
+// 写入全在 Commit 里。
+type PreparedBodies struct {
+	plains  [][]byte
+	inBatch []bool     // 每行是否属于"走块表"的那一批
+	block   *BatchPlan // 块表那部分的分块/摘要/组帧
+	frames  [][]byte   // 非批行的逐行帧（nil = 存明文）
+}
+
+// PrepareBodies 是 PackBodies 的前半程：分块、摘要、组帧、自检与逐行帧全部在
+// 这里完成，对块表只发只读查询。q 可以是事务也可以是普通句柄——迁移在事务外
+// 调用它（CPU 不进写锁窗口），写路径在插入事务内调用它。
+//
+// 与 PackBodies 走同一份判定与编码代码，所以两条路写出的形态逐字节同形。
+func PrepareBodies(ctx context.Context, q *gorm.DB, plains [][]byte) (*PreparedBodies, error) {
+	p := &PreparedBodies{
+		plains:  plains,
+		inBatch: make([]bool, len(plains)),
+		frames:  make([][]byte, len(plains)),
+	}
 
 	// 先挑出该走块表的行。太小的行不进批：分块器对它们本来也只切出一块，
-	// 走块表要多付一条引用加一行块表记录，比省下来的还多。
-	var (
-		idx   []int
-		batch [][]byte
-	)
-	for i, p := range plains {
-		if len(p) >= inputBlockMin && !compress.LooksLikeFrame(p) {
-			idx = append(idx, i)
-			batch = append(batch, p)
+	// 走块表要多付一条引用加一行块表记录，比它省下来的还多。
+	var batch [][]byte
+	for i, b := range plains {
+		if len(b) >= inputBlockMin && !compress.LooksLikeFrame(b) {
+			p.inBatch[i] = true
+			batch = append(batch, b)
 		}
 	}
 	if len(batch) > 0 {
-		rowRefs, err := blockStore.PutBatch(ctx, tx, batch)
+		plan, err := blockStore.PrepareBatch(ctx, q, batch)
+		if err != nil {
+			return nil, fmt.Errorf("compress: input 预处理失败: %w", err)
+		}
+		p.block = plan
+	}
+
+	// 非批行（太小或已经是帧）的逐行帧在事务外压好。
+	// 批行理论上不会返回空引用（分不出块的行进不了批），真发生了在 Commit 里
+	// 现场兜底——与改造前的事务内回退是同一份代码。
+	for i, b := range plains {
+		if len(b) == 0 || p.inBatch[i] || compress.LooksLikeFrame(b) {
+			continue
+		}
+		frame, ok := compress.EncodeVerified(b, compress.TypeRowFrame, compress.LevelWrite)
+		if !ok || len(frame) >= len(b) {
+			continue // 压不动就存明文
+		}
+		p.frames[i] = frame
+	}
+	return p, nil
+}
+
+// Commit 是 PackBodies 的后半程：只在调用方的事务里做 SQL 与按 id 拼引用。
+func (p *PreparedBodies) Commit(ctx context.Context, tx *gorm.DB) ([][]byte, error) {
+	out := make([][]byte, len(p.plains))
+
+	if p.block != nil {
+		rowRefs, err := blockStore.CommitBatch(ctx, tx, p.block)
 		if err != nil {
 			return nil, fmt.Errorf("compress: input 入块表失败: %w", err)
 		}
-		for j, refs := range rowRefs {
+		j := 0
+		for i := range p.plains {
+			if !p.inBatch[i] {
+				continue
+			}
+			refs := rowRefs[j]
+			j++
 			if len(refs) == 0 {
 				continue
 			}
 			// 引用序列过不了自检就退回逐行帧（下面的循环兜）。此时块已经写进
 			// 本事务了，但这一行仍要存下来——丢 body 比留几个孤儿块严重得多，
 			// 孤儿由块表 GC 兜底回收。真走到这里说明压缩代码本身有问题。
-			out[idx[j]] = EncodeRefs(refs)
+			out[i] = EncodeRefs(refs)
 		}
 	}
 
-	for i, p := range plains {
-		if len(p) == 0 || out[i] != nil || compress.LooksLikeFrame(p) {
+	for i, b := range p.plains {
+		if len(b) == 0 || out[i] != nil || compress.LooksLikeFrame(b) {
 			continue
 		}
-		frame, ok := compress.EncodeVerified(p, compress.TypeRowFrame, compress.LevelWrite)
-		if !ok || len(frame) >= len(p) {
+		if p.frames[i] != nil {
+			out[i] = p.frames[i]
+			continue
+		}
+		// 批行出现空引用的理论角（分不出块）：现场兜底，与改造前同一份代码。
+		frame, ok := compress.EncodeVerified(b, compress.TypeRowFrame, compress.LevelWrite)
+		if !ok || len(frame) >= len(b) {
 			continue // 压不动就存明文
 		}
 		out[i] = frame
