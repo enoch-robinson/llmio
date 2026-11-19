@@ -24,6 +24,9 @@ const balanceTestBody = `{"model":"test-model","messages":[{"role":"user","conte
 func setupBalanceTestDB(t *testing.T) {
 	t.Helper()
 	models.Init(context.Background(), filepath.Join(t.TempDir(), "llmio.db"))
+	// 路由解析缓存是包级的，跨测试会命中上个库的候选（指向已关闭的假上游），先清掉
+	InvalidateModelRouteCache()
+	t.Cleanup(InvalidateModelRouteCache)
 	t.Cleanup(func() {
 		if models.DB == nil {
 			return

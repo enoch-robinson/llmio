@@ -213,6 +213,9 @@ func TestBalanceChatStreamEndToEnd(t *testing.T) {
 // 重试机制切换到健康供应商,并写入失败日志。
 func TestBalanceChatFailoverOnFastFailure(t *testing.T) {
 	models.Init(context.Background(), filepath.Join(t.TempDir(), "llmio-test.db"))
+	// 路由解析缓存是包级的，跨测试会命中上个库的候选（指向已关闭的假上游），先清掉
+	InvalidateModelRouteCache()
+	t.Cleanup(InvalidateModelRouteCache)
 
 	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

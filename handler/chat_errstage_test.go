@@ -11,6 +11,7 @@ import (
 
 	"github.com/atopos31/llmio/consts"
 	"github.com/atopos31/llmio/models"
+	"github.com/atopos31/llmio/service"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -54,6 +55,10 @@ func setupErrstageDB(t *testing.T, baseURL string) {
 
 	prev := models.DB
 	models.DB = db
+	// 路由解析缓存是包级的：相同 key（协议|模型名）会命中上个测试留下的候选，
+	// 指向的却是已关闭的假上游，失败重试协程还会跨 teardown 写库。建库后清掉。
+	service.InvalidateModelRouteCache()
+	t.Cleanup(service.InvalidateModelRouteCache)
 	t.Cleanup(func() {
 		models.DB = prev
 		if sqlDB, err := db.DB(); err == nil {

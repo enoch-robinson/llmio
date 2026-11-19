@@ -166,6 +166,8 @@ func CreateProvider(c *gin.Context) {
 		common.InternalServerError(c, "Failed to create provider: "+err.Error())
 		return
 	}
+	// 路由解析结果有 30s 缓存（service.ProvidersWithMetaBymodelsName），路由表写完立即失效
+	service.InvalidateModelRouteCache()
 
 	common.Success(c, provider)
 }
@@ -209,6 +211,7 @@ func UpdateProvider(c *gin.Context) {
 		common.InternalServerError(c, "Failed to update provider: "+err.Error())
 		return
 	}
+	service.InvalidateModelRouteCache()
 
 	// Get updated provider
 	updatedProvider, err := gorm.G[models.Provider](models.DB).Where("id = ?", id).First(c.Request.Context())
@@ -240,6 +243,7 @@ func DeleteProvider(c *gin.Context) {
 		common.InternalServerError(c, "Failed to delete provider: "+err.Error())
 		return
 	}
+	service.InvalidateModelRouteCache()
 
 	if result == 0 {
 		common.NotFound(c, "Provider not found")
@@ -342,6 +346,7 @@ func CreateModel(c *gin.Context) {
 		common.InternalServerError(c, "Failed to create model: "+err.Error())
 		return
 	}
+	service.InvalidateModelRouteCache()
 
 	common.Success(c, model)
 }
@@ -392,6 +397,7 @@ func UpdateModel(c *gin.Context) {
 		common.InternalServerError(c, "Failed to update model: "+err.Error())
 		return
 	}
+	service.InvalidateModelRouteCache()
 
 	// Get updated model
 	updatedModel, err := gorm.G[models.Model](models.DB).Where("id = ?", id).First(c.Request.Context())
@@ -455,6 +461,7 @@ func UpdateModelOrder(c *gin.Context) {
 		common.InternalServerError(c, "Failed to update model order: "+err.Error())
 		return
 	}
+	service.InvalidateModelRouteCache()
 
 	slog.Info("UpdateModelOrder", "count", len(modelIDs))
 	common.Success(c, map[string]any{"updated": len(modelIDs)})
@@ -474,6 +481,7 @@ func DeleteModel(c *gin.Context) {
 		common.InternalServerError(c, "Failed to delete model: "+err.Error())
 		return
 	}
+	service.InvalidateModelRouteCache()
 
 	if result == 0 {
 		common.NotFound(c, "Model not found")
@@ -638,6 +646,7 @@ func CreateModelProvider(c *gin.Context) {
 		common.InternalServerError(c, "Failed to create model-provider association: "+err.Error())
 		return
 	}
+	service.InvalidateModelRouteCache()
 
 	common.Success(c, modelProvider)
 }
@@ -702,6 +711,7 @@ func UpdateModelProvider(c *gin.Context) {
 		common.InternalServerError(c, "Failed to update model-provider association: "+err.Error())
 		return
 	}
+	service.InvalidateModelRouteCache()
 
 	// 结构体更新会跳过零值，指针为 nil 正是"没配峰谷"的表达，因此它会被
 	// 整条跳过——用户把峰谷关掉后旧条款仍留在库里，下次开启会拿回一份陈年配置。
@@ -712,6 +722,7 @@ func UpdateModelProvider(c *gin.Context) {
 			common.InternalServerError(c, "Failed to clear peak terms: "+err.Error())
 			return
 		}
+		service.InvalidateModelRouteCache()
 	}
 
 	// Get updated model-provider association
@@ -758,6 +769,7 @@ func UpdateModelProviderStatus(c *gin.Context) {
 		common.InternalServerError(c, "Failed to update status: "+err.Error())
 		return
 	}
+	service.InvalidateModelRouteCache()
 
 	existing.Status = &status
 	common.Success(c, existing)
@@ -777,6 +789,7 @@ func DeleteModelProvider(c *gin.Context) {
 		common.InternalServerError(c, "Failed to delete model-provider association: "+err.Error())
 		return
 	}
+	service.InvalidateModelRouteCache()
 
 	if result == 0 {
 		common.NotFound(c, "Model-provider association not found")

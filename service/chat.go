@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/atopos31/llmio/balancers"
@@ -771,7 +773,115 @@ func splitWeightItems(modelWithProviders []models.ModelWithProvider, providerMap
 	return weightItems, backupWeightItems
 }
 
+// modelRouteCacheTTL 模型路由解析缓存的时效，与 peak/self-heal 对齐：
+// 绕过失效钩子直接改库的变更最迟一个 TTL 后生效。
+const modelRouteCacheTTL = 30 * time.Second
+
+// modelRouteCacheKey 覆盖 ProvidersWithMetaBymodelsName 的全部查询输入，
+// 缺一项就会把 A 配置解析出的路由当 B 的用。
+type modelRouteCacheKey struct {
+	style            string
+	model            string
+	toolCall         bool
+	structuredOutput bool
+	image            bool
+}
+
+type modelRouteCacheEntry struct {
+	meta *ProvidersWithMeta
+	at   time.Time
+}
+
+var (
+	modelRouteCacheMu sync.RWMutex
+	// modelRouteCache 只存成功解析：not-found 与查库失败不落缓存，
+	// 保证失败日志每请求都落、修复配置后下一次解析立即生效。
+	modelRouteCache = make(map[modelRouteCacheKey]modelRouteCacheEntry)
+)
+
+// ProvidersWithMetaBymodelsName 解析某模型在某协议下的候选路由，带 30s TTL 缓存。
+// 缓存存的是加载结果的**私有母本**，命中时每次返回深拷贝（原因见 deepCopyProvidersWithMeta）。
 func ProvidersWithMetaBymodelsName(ctx context.Context, style string, before Before) (*ProvidersWithMeta, error) {
+	key := modelRouteCacheKey{
+		style:            style,
+		model:            before.Model,
+		toolCall:         before.toolCall,
+		structuredOutput: before.structuredOutput,
+		image:            before.image,
+	}
+
+	modelRouteCacheMu.RLock()
+	if entry, ok := modelRouteCache[key]; ok && time.Since(entry.at) < modelRouteCacheTTL {
+		modelRouteCacheMu.RUnlock()
+		return deepCopyProvidersWithMeta(entry.meta), nil
+	}
+	modelRouteCacheMu.RUnlock()
+
+	// 同 key 并发未命中只放一个进库，其余共享这一次结果
+	sfKey := fmt.Sprintf("model-route:%s|%s|%t|%t|%t", style, before.Model, before.toolCall, before.structuredOutput, before.image)
+	ch := singleFlightGroup.DoChan(sfKey, func() (any, error) {
+		meta, err := loadProvidersWithMeta(ctx, style, before)
+		if err != nil {
+			// not-found 路径已落失败日志，负结果不缓存
+			return nil, err
+		}
+		return meta, nil
+	})
+
+	select {
+	case r := <-ch:
+		if r.Err != nil {
+			return nil, r.Err
+		}
+		meta := r.Val.(*ProvidersWithMeta)
+		modelRouteCacheMu.Lock()
+		modelRouteCache[key] = modelRouteCacheEntry{meta: meta, at: time.Now()}
+		modelRouteCacheMu.Unlock()
+		return deepCopyProvidersWithMeta(meta), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// InvalidateModelRouteCache 清空模型路由解析缓存，供 Model/Provider/ModelWithProvider
+// 增删改成功后调用（见 handler/api.go 各写路径）。
+func InvalidateModelRouteCache() {
+	modelRouteCacheMu.Lock()
+	modelRouteCache = make(map[modelRouteCacheKey]modelRouteCacheEntry)
+	modelRouteCacheMu.Unlock()
+}
+
+// deepCopyProvidersWithMeta 每次返回都要拷贝而不是共享，原因是存在真实 mutation 点：
+// balancers.NewLottery 会按引用持有 WeightItems/BackupWeightItems，并在转发路径上
+// Delete/Reduce 原地改写（balancers/balancers.go）。共享缓存的 map 会把一次请求里的
+// 候选淘汰永久写进母本，后续所有请求的候选池都被压缩。ModelWithProviderMap/ProviderMap
+// 及嵌套的 CustomerHeaders/ExtraBody 当前消费方只读，一并拷贝是防御性的，成本是几个
+// 小 map 的分配，远低于原来每请求 3 次查库。Peak 条款全链路按值传递只读，浅拷指针即可。
+func deepCopyProvidersWithMeta(meta *ProvidersWithMeta) *ProvidersWithMeta {
+	modelWithProviderMap := make(map[uint]models.ModelWithProvider, len(meta.ModelWithProviderMap))
+	for id, row := range meta.ModelWithProviderMap {
+		row.CustomerHeaders = maps.Clone(row.CustomerHeaders)
+		row.ExtraBody = maps.Clone(row.ExtraBody)
+		if row.Peak != nil {
+			peak := *row.Peak
+			row.Peak = &peak
+		}
+		modelWithProviderMap[id] = row
+	}
+	return &ProvidersWithMeta{
+		ModelWithProviderMap: modelWithProviderMap,
+		WeightItems:          maps.Clone(meta.WeightItems),
+		BackupWeightItems:    maps.Clone(meta.BackupWeightItems),
+		ProviderMap:          maps.Clone(meta.ProviderMap),
+		MaxRetry:             meta.MaxRetry,
+		TimeOut:              meta.TimeOut,
+		Strategy:             meta.Strategy,
+		Breaker:              meta.Breaker,
+	}
+}
+
+// loadProvidersWithMeta 是路由解析的查库本体，无缓存；缓存语义见 ProvidersWithMetaBymodelsName。
+func loadProvidersWithMeta(ctx context.Context, style string, before Before) (*ProvidersWithMeta, error) {
 	model, err := gorm.G[models.Model](models.DB).Where("name = ?", before.Model).First(ctx)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {

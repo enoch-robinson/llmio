@@ -25,6 +25,9 @@ func setupSelfHealChatDB(t *testing.T) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "selfheal-chat.db")
 	models.Init(context.Background(), path)
+	// 路由解析缓存是包级的，跨测试会命中上个库的候选（指向已关闭的假上游），先清掉
+	InvalidateModelRouteCache()
+	t.Cleanup(InvalidateModelRouteCache)
 	t.Cleanup(func() {
 		if sqlDB, err := models.DB.DB(); err == nil {
 			_ = sqlDB.Close()
