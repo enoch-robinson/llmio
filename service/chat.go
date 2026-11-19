@@ -72,6 +72,11 @@ func sleepBackoff(ctx context.Context, attempt int) {
 // 压缩是优化、IO 记录是观测，两者都不该让一次成功的聊天变成失败：
 // 第一次按正常形态写（可能走块表），之后每次都带 SkipCompress——明文行没有块表
 // 写入，事务小得多，在锁竞争里活下来的概率高得多。丢掉的只是压缩率。
+//
+// 当压缩迁移开着（deferPackHotPath）时，正常形态也走明文：迁移的候选判据本来
+// 就是 typeof='text'（"这一列还没迁"），它会在一轮之内把行压好。这样分块、
+// 摘要、level-9 压缩、自检与块表写入都离开客户端可感知路径——本函数跑在
+// RecordLog 读 pipe **之前**，而 io.Pipe 是同步的，这些 CPU 直接挡首包。
 func createChatIO(ctx context.Context, logId uint, raw []byte) error {
 	var lastErr error
 	for attempt := 0; attempt < ioCreateAttempts; attempt++ {
@@ -81,7 +86,7 @@ func createChatIO(ctx context.Context, logId uint, raw []byte) error {
 		rec := &models.ChatIO{
 			Input:        models.BodyBytes(raw),
 			LogId:        logId,
-			SkipCompress: attempt > 0,
+			SkipCompress: attempt > 0 || deferPackHotPath.Load(),
 		}
 		err := gorm.G[models.ChatIO](models.DB).Create(ctx, rec)
 		if err == nil {

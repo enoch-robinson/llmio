@@ -79,6 +79,16 @@ var compressInFlight atomic.Bool
 // 暂停是操作员的即时动作，不该等到下一批落库才被看见。
 var compressPauseRequested atomic.Bool
 
+// deferPackHotPath 决定写路径（service/chat.go 的 createChatIO）是否把 IO
+// 记录先落成明文、把压缩留给迁移。由两个地方维护：调度器每 30 秒 tick 读到
+// 的 Enabled，管理端保存策略时立即同步。默认 false，即与压缩迁移上线前的
+// 行为一致（写即压）。
+//
+// **必须跟着 policy.Enabled 走**：迁移关着的时候热路径写明文，压缩与去重就
+// 永远不会发生（明文行没人补压），磁盘只涨不降。反过来，迁移开着时它天然是
+// "这一列还没迁"的候选（判据就是 typeof='text'），一轮之内压好。
+var deferPackHotPath atomic.Bool
+
 // ── 策略 ──────────────────────────────────────────────────────────────────
 
 func DefaultLogCompressPolicy() *models.LogCompressPolicy {
@@ -152,7 +162,12 @@ func SaveLogCompressPolicy(ctx context.Context, policy *models.LogCompressPolicy
 	if err != nil {
 		return err
 	}
-	return models.SaveConfigValue(ctx, models.KeyLogCompressPolicy, string(raw))
+	if err := models.SaveConfigValue(ctx, models.KeyLogCompressPolicy, string(raw)); err != nil {
+		return err
+	}
+	// 开关立刻生效：热路径的明文/压缩形态不必等下一个调度 tick
+	deferPackHotPath.Store(policy.Enabled)
+	return nil
 }
 
 // EnsureLogCompressPolicyConfig 在缺行时落一行默认策略。可重复调用。
@@ -1116,6 +1131,9 @@ func StartLogCompressScheduler(ctx context.Context) {
 				slog.Error("load log compress policy failed", "error", err)
 				return
 			}
+			// 热路径写降级形态的开关跟着策略走：这里失败时保持上一个值，
+			// 默认 false 是"写即压"，是更安全的那一侧。
+			deferPackHotPath.Store(policy.Enabled)
 			if !policy.Enabled {
 				return
 			}

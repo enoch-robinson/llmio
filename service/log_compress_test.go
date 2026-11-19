@@ -38,6 +38,9 @@ func setupLogCompressTestDB(t *testing.T) *gorm.DB {
 		// 这两个标志是包级的，测试之间必须复位，否则"暂停"会漏到下一个用例。
 		compressInFlight.Store(false)
 		compressPauseRequested.Store(false)
+		// 热路径明文开关同理：SaveLogCompressPolicy(Enabled:true) 会把它置位，
+		// 漏到下一个用例就会改变默认写形态
+		deferPackHotPath.Store(false)
 	})
 	return models.DB
 }
