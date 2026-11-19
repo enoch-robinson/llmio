@@ -410,21 +410,30 @@ func orderToolResultsFirst(turns []anthropicTurn, notes *[]Note) []anthropicTurn
 		if turns[i].role != "user" {
 			continue
 		}
+		// 先一趟看这一轮到底有没有 tool_result：长会话里绝大多数 user 轮是纯
+		// 文本，没有就直接跳过，省掉下面两次 make——逐请求翻译整段历史时，
+		// 那是对上百轮做的纯无效分配
+		hasResult := false
+		for _, b := range turns[i].blocks {
+			if b.Type == blockToolResult {
+				hasResult = true
+				break
+			}
+		}
+		if !hasResult {
+			continue
+		}
 		ordered := make([]AnthropicBlock, 0, len(turns[i].blocks))
 		for _, b := range turns[i].blocks {
 			if b.Type == blockToolResult {
 				ordered = append(ordered, b)
 			}
 		}
-		// 没有 tool_result 时下面这个循环会把原序原样搬过去，不产生 Note
 		rest := make([]AnthropicBlock, 0, len(turns[i].blocks))
 		for _, b := range turns[i].blocks {
 			if b.Type != blockToolResult {
 				rest = append(rest, b)
 			}
-		}
-		if len(ordered) == 0 {
-			continue
 		}
 		if len(rest) > 0 && turns[i].blocks[0].Type != blockToolResult {
 			*notes = append(*notes, NoteReorderedToolResult)
@@ -608,9 +617,14 @@ func toolInput(arguments string) (json.RawMessage, error) {
 	if s == "" || s == "null" {
 		return json.RawMessage(`{}`), nil
 	}
-	var obj map[string]any
-	if err := json.Unmarshal([]byte(s), &obj); err != nil {
-		return nil, fmt.Errorf("tool call arguments are not a JSON object: %s", err)
+	// 校验等价于原来的 Unmarshal 进 map[string]any（成功即有效），但不建整棵
+	// map 树：s 的开头空白已被 TrimSpace 消掉，于是"成功"恰好等价于"合法 JSON
+	// 且首个字节是'{'"——顶层 null 在上面已短路成 {}（现状如此，保持不变）；
+	// 数组/字符串/数字/布尔的首字节都不是'{'；非法 JSON 过不了 json.Valid。
+	// 唯一的行为差别是含超出 float64 范围数字的对象（如 {"a":1e999}）原来会被
+	// 连带拒掉，现在放行——校验结果本来就没被使用，没有理由为它建树再拒绝。
+	if !json.Valid([]byte(s)) || s[0] != '{' {
+		return nil, fmt.Errorf("tool call arguments are not a JSON object")
 	}
 	return json.RawMessage(s), nil
 }

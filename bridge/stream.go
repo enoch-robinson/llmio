@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"strconv"
@@ -55,7 +56,7 @@ func (d *sseDecoder) Decode(p []byte) []sseEvent {
 	d.carry = append(d.carry, p...)
 	var out []sseEvent
 	for {
-		idx := indexByte(d.carry, '\n')
+		idx := bytes.IndexByte(d.carry, '\n')
 		if idx < 0 {
 			return out
 		}
@@ -111,15 +112,6 @@ func (d *sseDecoder) Flush() []sseEvent {
 	d.name = ""
 	d.data = nil
 	return []sseEvent{ev}
-}
-
-func indexByte(b []byte, c byte) int {
-	for i, v := range b {
-		if v == c {
-			return i
-		}
-	}
-	return -1
 }
 
 // encodeSSE 拼一条 SSE 事件。event 名为空时只发 data 行（OpenAI 的形状）。
@@ -698,8 +690,14 @@ type BridgedBody struct {
 	src    io.ReadCloser
 	stream Streamer
 	out    []byte
-	done   bool
-	err    error
+	// buf 供 Read 循环逐轮复用的上游读取缓冲（首次读取时才分配）。
+	// 跨轮复用是安全的：io.Reader 的调用是串行的，src 按 Read 的契约不允许
+	// 在返回后再碰 p；buf[:n] 交给 stream.Write 后在下一轮迭代开始前就被
+	// 同步消费完（本包的 Streamer 实现只会把字节复制进自己的状态，不保留
+	// 调用方切片），没有任何跨轮引用。
+	buf  []byte
+	done bool
+	err  error
 }
 
 // NewBridgedBody 包一层翻译。src 会在读到 EOF 或出错时关闭。
@@ -718,10 +716,12 @@ func (b *BridgedBody) Read(p []byte) (int, error) {
 			}
 			return 0, io.EOF
 		}
-		buf := make([]byte, 4096)
-		n, err := b.src.Read(buf)
+		if b.buf == nil {
+			b.buf = make([]byte, 4096)
+		}
+		n, err := b.src.Read(b.buf)
 		if n > 0 {
-			chunk, cerr := b.stream.Write(buf[:n])
+			chunk, cerr := b.stream.Write(b.buf[:n])
 			if cerr != nil {
 				b.done = true
 				return 0, cerr
